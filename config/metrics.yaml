@@ -1,0 +1,14 @@
+revenue:
+  definition: >
+    SUM(order_items.sale_price) over items whose status is not Cancelled or Returned.
+  sql_hint: "status NOT IN ('Cancelled', 'Returned')"
+margin:
+  definition: sale_price minus products.cost, on the same non-cancelled, non-returned items.
+aov:
+  definition: revenue divided by the count of distinct orders.
+churn:
+  definition: >
+    A customer with at least one historical order and no order in the last 90 days,
+    compared month over month. State this definition whenever churn is discussed.
+active_customer:
+  definition: A customer with at least one non-cancelled, non-returned item in the period.

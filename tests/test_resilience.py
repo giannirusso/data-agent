@@ -1,0 +1,268 @@
+"""Self-correction, fallback, empty results, and a CLI that stays up."""
+
+import json
+from pathlib import Path
+
+from agent.cli import handle_message
+from agent.data.cache import QueryCache
+from agent.golden.retriever import GoldenRetriever
+from agent.llm.models import CircuitBreaker, ModelProvider
+from agent.persona import PersonaStore
+from config.settings import project_root
+from tests.conftest import FakeBQ, make_runtime
+
+VALID = (
+    "SELECT SUM(sale_price) AS revenue FROM order_items "
+    "WHERE status NOT IN ('Cancelled','Returned')"
+)
+
+
+def test_bad_sql_is_fixed_on_retry(settings):
+    bq = FakeBQ()
+    replies = iter(
+        [
+            "SELEC revenue FROM order_items",
+            VALID,
+            "Revenue was 100.",
+        ]
+    )
+    runtime = make_runtime(settings, bq=bq, complete=lambda system, user, tier: next(replies))
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert bq.execute_count == 1
+    assert len(bq.dry_runs) == 1
+    assert "100" in reply
+    assert "trace:" in reply
+    assert "Definitions:" in reply
+
+
+def test_three_distinct_failures_give_a_graceful_message(settings):
+    bq = FakeBQ()
+    bad = iter(
+        [
+            "DELETE FROM orders WHERE 1=1",
+            "DROP TABLE products",
+            "SELECT email FROM users",
+        ]
+    )
+
+    def complete(system, user, tier):
+        if "PURPOSE: sql" in system:
+            return next(bad)
+        return "unused"
+
+    runtime = make_runtime(settings, bq=bq, complete=complete)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert bq.executed == []
+    assert "couldn't answer" in reply.lower() or "several attempts" in reply.lower()
+    assert "trace:" in reply
+
+
+def test_identical_sql_stops_early(settings):
+    bq = FakeBQ()
+    calls = {"n": 0}
+
+    def complete(system, user, tier):
+        if "PURPOSE: sql" in system:
+            calls["n"] += 1
+            return "DELETE FROM orders WHERE 1=1"
+        return "unused"
+
+    runtime = make_runtime(settings, bq=bq, complete=complete)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert calls["n"] == 2
+    assert bq.executed == []
+    assert "trace:" in reply
+
+
+def test_rate_limit_falls_back_to_flash(settings):
+    class RateLimit(Exception):
+        def __init__(self):
+            super().__init__("429 resource exhausted")
+            self.status_code = 429
+
+    def complete(system, user, tier):
+        if tier == "pro":
+            raise RateLimit()
+        if "PURPOSE: sql" in system:
+            return VALID
+        return "Revenue was 100 after the fallback model."
+
+    bq = FakeBQ()
+    runtime = make_runtime(settings, bq=bq, complete=complete)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert runtime.deps.models.fallback_used
+    assert "flash" in runtime.deps.models.calls
+    assert bq.execute_count == 1
+    assert "100" in reply
+
+
+def test_empty_result_is_reported_honestly(settings):
+    bq = FakeBQ(rows=[])
+    step = {"n": 0}
+
+    def complete(system, user, tier):
+        if "PURPOSE: sql" in system:
+            step["n"] += 1
+            return (
+                "SELECT SUM(sale_price) AS revenue FROM order_items "
+                f"WHERE status = 'NoSuch{step['n']}'"
+            )
+        return "No orders matched these filters."
+
+    runtime = make_runtime(settings, bq=bq, complete=complete)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert bq.execute_count == 2
+    assert "no orders" in reply.lower() or "no rows" in reply.lower()
+
+
+def test_negative_revenue_is_retried(settings):
+    frames = iter(
+        [
+            [{"revenue": -5}],
+            [{"revenue": 12}],
+        ]
+    )
+    bq = FakeBQ(rows=lambda sql: next(frames))
+    step = {"n": 0}
+
+    def complete(system, user, tier):
+        if "PURPOSE: sql" in system:
+            step["n"] += 1
+            return VALID + f" /* {step['n']} */"
+        return "Revenue was 12 after a corrected query."
+
+    runtime = make_runtime(settings, bq=bq, complete=complete)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert bq.execute_count == 2
+    assert "12" in reply
+
+
+def test_report_plans_several_steps_and_cites_a_trio(settings):
+    bq = FakeBQ()
+    step = {"n": 0}
+
+    def complete(system, user, tier):
+        if "PURPOSE: plan" in system:
+            return json.dumps(
+                {
+                    "subquestions": [
+                        {"question": "Q1 revenue by month", "purpose": "revenue"},
+                        {"question": "Top categories in Q1", "purpose": "categories"},
+                        {"question": "Return rate in Q1", "purpose": "returns"},
+                    ]
+                }
+            )
+        if "PURPOSE: sql" in system:
+            step["n"] += 1
+            return VALID + f" /* step {step['n']} */"
+        return (
+            "Insights: Q1 revenue is in the tables. "
+            "Action items: 1) review returns 2) plan Q2.\nTITLE: Q1 Performance"
+        )
+
+    runtime = make_runtime(settings, bq=bq, complete=complete)
+    reply = handle_message(
+        runtime,
+        "Create a Q1 performance report with insights and action items",
+    )
+    assert bq.execute_count == 3
+    assert "Action items" in reply
+    assert "Saved as report #" in reply
+    assert "gb-" in reply
+    log = Path(settings.log_path).read_text(encoding="utf-8")
+    assert "gb-" in log
+    assert '"steps": 3' in log or '"steps":3' in log
+
+
+def test_unauthorized_brand_does_not_query(settings):
+    bq = FakeBQ()
+    runtime = make_runtime(settings, bq=bq, complete=lambda *args: VALID)
+    reply = handle_message(runtime, "Show Tommy Hilfiger revenue")
+    assert "don't have access" in reply.lower()
+    assert "Tommy Hilfiger" in reply
+    assert bq.executed == []
+
+
+def test_cli_swallows_unexpected_errors_and_masks_logs(settings):
+    runtime = make_runtime(settings, bq=FakeBQ(), complete=None)
+
+    class Boom:
+        def __init__(self, real):
+            self.real = real
+
+        def get_state(self, *args, **kwargs):
+            return self.real.get_state(*args, **kwargs)
+
+        def stream(self, *args, **kwargs):
+            raise RuntimeError("contact secret@example.com immediately")
+
+    runtime.graph = Boom(runtime.graph)
+    reply = handle_message(runtime, "What was revenue last month?")
+    assert "something went wrong" in reply.lower()
+    assert "secret@example.com" not in reply
+    assert "trace" in reply.lower()
+    logged = Path(settings.log_path).read_text(encoding="utf-8")
+    assert "secret@example.com" not in logged
+
+
+def test_cache_is_scoped_by_user_and_sql():
+    cache = QueryCache(maxsize=2)
+    key_a = cache.make_key("select 1", {"entitled_brands": ["A"]}, "alice")
+    key_b = cache.make_key("select 1", {"entitled_brands": ["B"]}, "alice")
+    cache.set(key_a, {"rows": [1]})
+    assert cache.get(key_a)["rows"] == [1]
+    assert cache.get(key_b) is None
+
+
+def test_circuit_breaker_opens_after_repeated_failures():
+    breaker = CircuitBreaker(threshold=2, reset_seconds=30)
+    assert breaker.allow(0)
+    breaker.record_failure(0)
+    assert breaker.allow(0)
+    breaker.record_failure(0)
+    assert not breaker.allow(10)
+    assert breaker.allow(31)
+
+
+def test_persona_reloads_when_the_file_changes(tmp_path):
+    path = tmp_path / "persona.yaml"
+    path.write_text("version: '1'\ntone: formal\n", encoding="utf-8")
+    store = PersonaStore(str(path))
+    assert store.load()["tone"] == "formal"
+    path.write_text("version: '2'\ntone: warm\n", encoding="utf-8")
+    import os
+    import time
+
+    os.utime(path, (time.time() + 5, time.time() + 5))
+    assert store.version == "2"
+    assert "warm" in store.prompt_block()
+
+
+def test_golden_bucket_retrieves_the_state_spend_trio():
+    retriever = GoldenRetriever(str(project_root() / "golden_bucket" / "trios.jsonl"))
+    hits = retriever.search("Why are users in Texas underspending compared to California?", k=3)
+    assert hits
+    assert any(hit["id"] == "gb-0003" for hit in hits)
+
+
+def test_missing_model_does_not_crash(settings):
+    runtime = make_runtime(settings, bq=FakeBQ(), complete=None)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert "GOOGLE_API_KEY" in reply
+    assert "trace:" in reply
+
+
+def test_model_provider_does_not_retry_forever(settings):
+    calls = {"n": 0}
+
+    def complete(system, user, tier):
+        calls["n"] += 1
+        raise RuntimeError("429 rate limit")
+
+    provider = ModelProvider(settings, complete=complete, retry_min=0)
+    try:
+        provider.generate(tier="pro", system="PURPOSE: sql", user="hi")
+    except Exception as exc:
+        assert "unavailable" in str(exc).lower() or "429" in str(exc)
+    # pro is retried 3 times, then flash is retried 3 times
+    assert calls["n"] == 6

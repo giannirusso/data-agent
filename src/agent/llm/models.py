@@ -86,8 +86,15 @@ def is_config_error(exc: Exception) -> bool:
         "permission denied",
         "unauthenticated",
         "permission_denied",
+        "invalid_argument",
+        "invalid argument",
+        "unauthenticated",
     )
-    return any(marker in text for marker in markers)
+    if any(marker in text for marker in markers):
+        return True
+    import re
+
+    return re.search(r"\b(400|401|403|404)\b", text) is not None
 
 
 def is_transient(exc: Exception) -> bool:
@@ -151,6 +158,14 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     return None
 
 
+def _thinking_rejected(exc: BaseException) -> bool:
+    for item in _walk(exc):
+        text = str(item).lower()
+        if "thinking" in text and ("not supported" in text or "invalid_argument" in text or "invalid argument" in text):
+            return True
+    return False
+
+
 def _is_timeout(exc: Exception) -> bool:
     current: BaseException | None = exc
     seen: list[BaseException] = []
@@ -163,15 +178,14 @@ def _is_timeout(exc: Exception) -> bool:
 
 
 def config_message(model_id: str, exc: Exception) -> str:
-    return (
-        f"Model {model_id} not available: {short_reason(exc)}. "
-        "Set GEMINI_MODEL_PRO and GEMINI_MODEL_FLASH in .env."
-    )
+    return f"Model {model_id} rejected the request: {short_reason(exc)}."
 
 
 def short_reason(exc: Exception) -> str:
     text = " ".join(str(exc).split())
     lowered = text.lower()
+    if "thinking" in lowered and "not supported" in lowered:
+        return "thinking level is not supported for this model"
     if "no longer available" in lowered:
         return "no longer available to new users"
     if "api key" in lowered or "api_key" in lowered:
@@ -236,15 +250,32 @@ class ModelProvider:
         if primary == "pro" and not self.breaker.allow(self.clock()):
             self.fallback_used = True
             primary = "flash"
+        level = thinking_level if thinking_level is not None else (self.settings.gemini_thinking_level or None)
+        if isinstance(level, str) and not level.strip():
+            level = None
         try:
-            text = self._call(
-                primary,
-                system,
-                user,
-                thinking_level=thinking_level,
-                max_output_tokens=max_output_tokens,
-                max_attempts=max_attempts,
-            )
+            try:
+                text = self._call(
+                    primary,
+                    system,
+                    user,
+                    thinking_level=level,
+                    max_output_tokens=max_output_tokens,
+                    max_attempts=max_attempts,
+                )
+            except LLMConfigError as exc:
+                if level and _thinking_rejected(exc):
+                    text = self._call(
+                        primary,
+                        system,
+                        user,
+                        thinking_level=None,
+                        max_output_tokens=max_output_tokens,
+                        max_attempts=1,
+                        apply_thinking=False,
+                    )
+                else:
+                    raise
             if primary == "pro":
                 self.breaker.record_success()
             return text
@@ -305,9 +336,12 @@ class ModelProvider:
         thinking_level: str | None = None,
         max_output_tokens: int | None = None,
         max_attempts: int | None = None,
+        apply_thinking: bool = True,
     ) -> str:
         wait = wait_fixed(0) if self.retry_min <= 0 else wait_exponential(multiplier=self.retry_min, min=self.retry_min, max=self.retry_max)
         attempts = max_attempts or self.max_attempts
+        if not apply_thinking:
+            thinking_level = None
 
         @retry(
             reraise=True,
@@ -319,7 +353,7 @@ class ModelProvider:
             self.calls.append(tier)
             try:
                 if self._complete is not None:
-                    return self._complete(system, user, tier)
+                    return self._scripted(tier, system, user, thinking_level)
                 return self._invoke_gemini(
                     tier,
                     system,
@@ -377,6 +411,21 @@ class ModelProvider:
             return "".join(parts)
         return str(content)
 
+    def _scripted(self, tier: str, system: str, user: str, thinking_level: str | None) -> str:
+        import inspect
+
+        signature = inspect.signature(self._complete)
+        parameters = list(signature.parameters.values())
+        variadic = any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in parameters)
+        positional = [
+            item
+            for item in parameters
+            if item.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if variadic or len(positional) >= 4:
+            return self._complete(system, user, tier, thinking_level)
+        return self._complete(system, user, tier)
+
     def _gemini(self, tier: str):
         if tier in self._models:
             return self._models[tier]
@@ -389,10 +438,9 @@ class ModelProvider:
             temperature=0,
             max_retries=0,
             timeout=self.settings.gemini_timeout_seconds,
-            # Gemini 3 defaults to a deep thinking level. "low" is the base.
-            # SQL calls override this with "minimal" (see generate_sql).
-            thinking_level="low",
-            max_output_tokens=1024,
+            # Thinking level is sent per request so a rejection can be retried
+            # with the parameter omitted. gemini-3.8-flash rejects "minimal".
+            max_output_tokens=2048,
         )
         self._models[tier] = model
         return model

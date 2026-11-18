@@ -72,7 +72,7 @@ def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list
     if deps.models.available() and frames and _llm_allowed(deps):
         user = _analyze_prompt(state, persona, prefs, frames, trios)
         try:
-            text = deps.models.generate(tier="pro", system=ANALYZE_SYSTEM, user=user, thinking_level="minimal")
+            text = deps.models.generate(tier="pro", system=ANALYZE_SYSTEM, user=user)
             if text and text.strip():
                 return _with_citation(text.strip(), trios), None
         except Exception:
@@ -131,8 +131,7 @@ def _one_narrative_call(deps: Deps, user: str) -> str:
         tier="pro",
         system=ANALYZE_SYSTEM,
         user=user,
-        thinking_level="minimal",
-        max_output_tokens=700,
+        max_output_tokens=2048,
         max_attempts=1,
     )
 

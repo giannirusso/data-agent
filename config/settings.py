@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # Free-tier gemini-3.8-flash often needs 60–90s for the first SQL call.
     # A 20s cap aborted a call that then succeeded at 76s.
     gemini_timeout_seconds: int = 90
+    # gemini-3.8-flash rejects "minimal". "low" is the fastest level it accepts.
+    gemini_thinking_level: str = "low"
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"

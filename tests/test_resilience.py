@@ -337,6 +337,50 @@ def test_model_provider_does_not_retry_forever(settings):
     assert calls["n"] == 2
 
 
+THINKING_400 = (
+    "Error calling model 'gemini-3.8-flash' (INVALID_ARGUMENT): 400 INVALID_ARGUMENT. "
+    "Thinking level MINIMAL is not supported for this model. Please retry with other thinking level."
+)
+
+
+def test_unsupported_thinking_level_retries_without_it(settings):
+    seen = []
+
+    def complete(system, user, tier, thinking_level=None):
+        seen.append(thinking_level)
+        if thinking_level:
+            raise RuntimeError(THINKING_400)
+        return "SELECT 1"
+
+    provider = ModelProvider(settings, complete=complete, retry_min=0)
+    assert provider.generate(tier="pro", system="PURPOSE: sql", user="hi", thinking_level="minimal") == "SELECT 1"
+    assert seen == ["minimal", None]
+
+
+def test_invalid_argument_is_a_config_error_not_busy(settings):
+    def complete(system, user, tier):
+        raise RuntimeError(THINKING_400)
+
+    runtime = make_runtime(settings, bq=FakeBQ(), complete=complete)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert "Model gemini-3.8-flash rejected the request:" in reply
+    assert "thinking level is not supported" in reply.lower()
+    assert "busy" not in reply.lower()
+
+
+def test_auth_errors_are_config_not_busy(settings):
+    def complete(system, user, tier):
+        raise RuntimeError("401 UNAUTHENTICATED: API key not valid")
+
+    provider = ModelProvider(settings, complete=complete, retry_min=0)
+    try:
+        provider.generate(tier="pro", system="PURPOSE: sql", user="hi")
+        raise AssertionError("expected failure")
+    except Exception as exc:
+        assert str(exc).startswith("Model gemini-3.8-flash rejected the request:")
+        assert "busy" not in str(exc).lower()
+
+
 def test_retired_model_is_a_config_error_not_busy(settings):
     calls = {"n": 0}
 
@@ -347,8 +391,8 @@ def test_retired_model_is_a_config_error_not_busy(settings):
     runtime = make_runtime(settings, bq=FakeBQ(), complete=complete)
     reply = handle_message(runtime, "Monthly revenue in 2023")
     assert calls["n"] == 1
-    assert "not available" in reply.lower()
-    assert "GEMINI_MODEL" in reply
+    assert "rejected the request" in reply.lower()
+    assert "no longer available" in reply.lower()
     assert "busy" not in reply.lower()
 
 

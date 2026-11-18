@@ -56,14 +56,13 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
         parts.append("Previous error:\n" + previous_error)
     user = "\n\n".join(parts)
     try:
-        # SQL is the first model call and the slow one on the free tier.
-        # "minimal" is below the default "low" used for the short analysis call.
+        # Thinking level comes from GEMINI_THINKING_LEVEL (default low).
+        # gemini-3.8-flash rejects "minimal". 2048 leaves room for thinking tokens plus SQL.
         raw = deps.models.generate(
             tier="pro",
             system=SQL_SYSTEM,
             user=user,
-            thinking_level="minimal",
-            max_output_tokens=512,
+            max_output_tokens=2048,
         )
     except LLMRateLimitError as exc:
         return {

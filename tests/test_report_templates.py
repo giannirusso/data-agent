@@ -1,6 +1,8 @@
 """Quarterly reports use fixed SQL and still finish if the model times out."""
 
+import json
 from datetime import date
+from pathlib import Path
 
 from agent.cli import handle_message
 from agent.reports.period import parse_period
@@ -84,9 +86,12 @@ def test_timeout_still_saves_a_template_report(settings):
     assert "Action items" in reply
     assert "template-based" in reply
     assert "Q1 2026" in reply
-    assert "timed out" not in reply.lower() or "template-based" in reply
+    assert "Narrative skipped: Gemini timed out" in reply
+    assert "revenue=" not in reply
     assert runtime.deps.bq.execute_count == 6
     assert "busy" not in reply.lower()
+    log = Path(settings.log_path).read_text(encoding="utf-8")
+    assert "Narrative skipped: Gemini timed out" in log
 
 
 def test_latest_order_date_is_queried_once_per_session(settings):
@@ -130,3 +135,69 @@ def test_latest_order_lookup_falls_back_to_today(settings):
     again, _ = resolve_data_through(runtime.deps, brands=runtime.brands, salt=settings.pii_salt)
     assert again == found
     assert runtime.deps.bq.execute_count == 1
+
+
+def test_template_summary_is_executive_prose_with_deltas():
+    from agent.reports.templates import template_summary
+
+    period = parse_period("Q1 report", data_through=NOV_2026, source="orders")
+    frames = [
+        {
+            "purpose": "qoq",
+            "rows": [
+                {"period": "current", "revenue": 7194.11, "orders": 216},
+                {"period": "previous", "revenue": 6673.57, "orders": 223},
+            ],
+        },
+        {"purpose": "categories", "rows": [{"category": "Outerwear & Coats", "revenue": 1529.05}]},
+        {"purpose": "returns", "rows": [{"returned_items": 33, "items": 311, "return_rate": 0.1061}]},
+        {"purpose": "customers", "rows": [{"new_customers": 208, "returning_customers": 8}]},
+    ]
+    text = template_summary(period, frames, skip_hint="Narrative skipped: Gemini rate limit (429)")
+    lines = text.splitlines()
+    assert lines[0].startswith("TITLE:")
+    assert lines[1] == ""
+    assert lines[2] == "Narrative skipped: Gemini rate limit (429)"
+    assert lines[3] == ""
+    assert lines[4].startswith("No year was given")
+    assert "$7,194.11" in text
+    assert "+7.8%" in text
+    assert "216 orders" in text
+    assert "-3.1%" in text
+    assert "$33.31" in text
+    assert "Top category: Outerwear & Coats, $1,529.05" in text
+    assert "Return rate 10.6% (33 of 311 items)" in text
+    assert "Customers: 208 new, 8 returning" in text
+    assert "template-based" in text
+    assert "retention" in text.lower()
+    assert "revenue=" not in text
+
+
+def test_rate_limit_retries_once_then_records_the_skip(settings):
+    calls = {"n": 0}
+
+    class RateLimit(Exception):
+        def __init__(self):
+            super().__init__("429 rate limit")
+            self.status_code = 429
+            self.retry_after = 0
+
+    def complete(system, user, tier):
+        calls["n"] += 1
+        raise RateLimit()
+
+    runtime = make_runtime(settings, bq=FakeBQ(rows=[{"revenue": 100.0, "orders": 4}]), complete=complete)
+    runtime.deps.data_through = NOV_2026
+    runtime.deps.data_through_source = "orders"
+    reply = handle_message(
+        runtime,
+        "create a report for Q1 including insights and action items for Q2",
+    )
+    assert calls["n"] == 2
+    assert "Narrative skipped: Gemini rate limit (429)" in reply
+    assert "template-based" in reply
+    assert reply.splitlines()[0].startswith("TITLE:")
+    assert reply.splitlines()[1] == ""
+    log = Path(settings.log_path).read_text(encoding="utf-8")
+    assert "Gemini rate limit (429)" in log
+    assert all(json.loads(line) for line in log.splitlines() if line.strip())

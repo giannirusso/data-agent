@@ -331,7 +331,7 @@ def test_model_provider_does_not_retry_forever(settings):
         provider.generate(tier="pro", system="PURPOSE: sql", user="hi")
         raise AssertionError("expected the provider to fail")
     except Exception as exc:
-        assert "busy" in str(exc).lower()
+        assert "429" in str(exc) or "busy" in str(exc).lower()
     # Same model id for both tiers, so there is no second pass.
     # One retry (2 attempts) then stop. A 404 must not be treated this way.
     assert calls["n"] == 2

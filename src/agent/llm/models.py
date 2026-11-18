@@ -30,6 +30,14 @@ class LLMTimeoutError(LLMFatalError):
     """The call or the turn budget ran out. This is not a 429."""
 
 
+class LLMRateLimitError(LLMFatalError):
+    """Gemini returned 429. retry_after is seconds, when the API provided one."""
+
+    def __init__(self, message: str = "Gemini rate limit (429)", *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class LLMConfigError(LLMFatalError):
     """Model id, key, or permission problem. Not retried and not called 'busy'."""
 
@@ -98,6 +106,49 @@ def is_transient(exc: Exception) -> bool:
         token in text
         for token in ("429", "500", "502", "503", "504", "resource exhausted", "rate limit", "service unavailable")
     )
+
+
+def _walk(exc: BaseException | None):
+    current = exc
+    seen: list[BaseException] = []
+    while current is not None and current not in seen:
+        yield current
+        seen.append(current)
+        current = current.__cause__ or current.__context__
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    for item in _walk(exc):
+        code = getattr(item, "status_code", None) or getattr(item, "code", None)
+        try:
+            if int(code) == 429:
+                return True
+        except (TypeError, ValueError):
+            pass
+        text = str(item).lower()
+        if "429" in text or "rate limit" in text or "resource exhausted" in text:
+            return True
+    return False
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    import re
+
+    for item in _walk(exc):
+        for attr in ("retry_after", "retry_after_seconds"):
+            raw = getattr(item, attr, None)
+            if raw is None:
+                continue
+            try:
+                return max(0.0, float(raw))
+            except (TypeError, ValueError):
+                continue
+        match = re.search(r"retry[- ]after[:\s]+(\d+(?:\.\d+)?)", str(item), re.IGNORECASE)
+        if not match:
+            match = re.search(r"retry in (\d+(?:\.\d+)?)\s*s", str(item), re.IGNORECASE)
+        if match:
+            return max(0.0, float(match.group(1)))
+    return None
 
 
 def _is_timeout(exc: Exception) -> bool:
@@ -214,6 +265,8 @@ class ModelProvider:
             if _is_timeout(first):
                 raise LLMTimeoutError("The model timed out. Try `/retry`.") from first
             if primary == "flash" or self._same_model():
+                if _is_rate_limit(first):
+                    raise LLMRateLimitError(retry_after=_retry_after_seconds(first)) from first
                 if isinstance(first, LLMTransientError):
                     raise LLMFatalError("The model is busy right now.") from first
                 raise LLMFatalError(str(first)) from first
@@ -230,6 +283,10 @@ class ModelProvider:
             except LLMConfigError:
                 raise
             except Exception as second:
+                if _is_timeout(second):
+                    raise LLMTimeoutError("The model timed out. Try `/retry`.") from second
+                if _is_rate_limit(second):
+                    raise LLMRateLimitError(retry_after=_retry_after_seconds(second)) from second
                 raise LLMFatalError("The model is busy right now.") from second
 
     def _same_model(self) -> bool:

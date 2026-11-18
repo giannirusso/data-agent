@@ -41,6 +41,7 @@ _DETAIL_KEYS = (
     "persona_version",
     "stop_retry",
     "prompt_chars",
+    "narrative_skip",
 )
 
 

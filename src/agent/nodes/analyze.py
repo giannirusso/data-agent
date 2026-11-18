@@ -16,7 +16,7 @@ def analyze_node(state: dict, deps: Deps) -> dict:
     persona = deps.persona.load()
     prefs = deps.reports.preferences(state.get("user_id") or "")
     frames = _frames(state)
-    narrative = _narrative(state, deps, persona, prefs, frames)
+    narrative, skip = _narrative(state, deps, persona, prefs, frames)
     masked = deps.masker.mask(narrative, extra_names=collect_pii_values(frames)).text
     title = _title(masked, state.get("user_text") or "Analysis")
     update = {
@@ -26,6 +26,8 @@ def analyze_node(state: dict, deps: Deps) -> dict:
         "status": "ok",
         "fatal": None,
     }
+    if skip:
+        update["narrative_skip"] = skip
     if state.get("results"):
         update["prior_results"] = list(state["results"])
     if state.get("save_report") or state.get("intent") == "report":
@@ -60,37 +62,40 @@ def _frames(state: dict) -> list:
     return list(state.get("results") or state.get("prior_results") or [])
 
 
-def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list | None = None) -> str:
+def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list | None = None) -> tuple[str, str | None]:
     frames = list(frames if frames is not None else _frames(state))
     trios = state.get("golden_trios") or []
     is_report = state.get("intent") == "report" or state.get("save_report") or state.get("template_sql")
     if is_report:
-        text = _report_narrative(state, deps, persona, prefs, frames, trios)
-        return _with_citation(text, trios)
+        text, skip = _report_narrative(state, deps, persona, prefs, frames, trios)
+        return _with_citation(text, trios), skip
     if deps.models.available() and frames and _llm_allowed(deps):
         user = _analyze_prompt(state, persona, prefs, frames, trios)
         try:
             text = deps.models.generate(tier="pro", system=ANALYZE_SYSTEM, user=user, thinking_level="minimal")
             if text and text.strip():
-                return _with_citation(text.strip(), trios)
+                return _with_citation(text.strip(), trios), None
         except Exception:
             pass
-    return _with_citation(_fallback(state, frames), trios)
+    return _with_citation(_fallback(state, frames), trios), None
 
 
-def _report_narrative(state, deps, persona, prefs, frames, trios) -> str:
-    """One model call. A timeout or the call cap still returns a saved report."""
+def _report_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, str | None]:
+    """One model call, plus one 429 retry if it still fits the turn budget."""
     period = parse_period(
         state.get("user_text") or "",
         data_through=getattr(deps, "data_through", None),
         source=getattr(deps, "data_through_source", "today"),
     )
     note = state.get("period_note") or period.note
-    fallback = template_summary(period, frames)
-    if note and note not in fallback:
-        fallback = note + "\n\n" + fallback
-    if not frames or not deps.models.available() or not _llm_allowed(deps):
-        return fallback
+    if not frames:
+        return _fallback_report(period, frames, note, None), None
+    if not deps.models.available():
+        hint = "Narrative skipped: Gemini is not configured"
+        return _fallback_report(period, frames, note, hint), hint
+    if not _llm_allowed(deps):
+        hint = "Narrative skipped: no time left in this turn"
+        return _fallback_report(period, frames, note, hint), hint
     user = _analyze_prompt(state, persona, prefs, frames, trios)
     user += (
         f"\n\nThis is a saved quarterly report for {period.label}. "
@@ -98,22 +103,79 @@ def _report_narrative(state, deps, persona, prefs, frames, trios) -> str:
         f"State this assumption: {note}"
     )
     try:
-        text = deps.models.generate(
-            tier="pro",
-            system=ANALYZE_SYSTEM,
-            user=user,
-            thinking_level="minimal",
-            max_output_tokens=700,
-            max_attempts=1,
-        )
-    except Exception:
-        return fallback
+        text = _one_narrative_call(deps, user)
+    except Exception as exc:
+        from agent.llm.models import LLMRateLimitError
+
+        if isinstance(exc, LLMRateLimitError) and _retry_fits(deps, exc.retry_after):
+            _sleep(exc.retry_after or 1.0)
+            try:
+                text = _one_narrative_call(deps, user)
+            except Exception as second:
+                hint = _skip_hint(second)
+                return _fallback_report(period, frames, note, hint), hint
+        else:
+            hint = _skip_hint(exc)
+            return _fallback_report(period, frames, note, hint), hint
     if not text or not text.strip():
-        return fallback
+        hint = "Narrative skipped: the model returned no usable narrative"
+        return _fallback_report(period, frames, note, hint), hint
     body = text.strip()
     if note not in body:
         body += "\n\n" + note
+    return body, None
+
+
+def _one_narrative_call(deps: Deps, user: str) -> str:
+    return deps.models.generate(
+        tier="pro",
+        system=ANALYZE_SYSTEM,
+        user=user,
+        thinking_level="minimal",
+        max_output_tokens=700,
+        max_attempts=1,
+    )
+
+
+def _fallback_report(period, frames, note: str, hint: str | None) -> str:
+    body = template_summary(period, frames, skip_hint=hint)
+    if note and note not in body:
+        body = body.replace(period.note, note, 1) if period.note in body else f"{body}\n\n{note}"
     return body
+
+
+def _retry_fits(deps: Deps, retry_after: float | None) -> bool:
+    import time
+
+    wait = 1.0 if retry_after is None else max(0.0, float(retry_after))
+    started = getattr(deps, "turn_started", 0) or 0
+    budget = getattr(deps.settings, "turn_budget_seconds", 0) or 0
+    if not started or not budget:
+        return True
+    remaining = budget - (time.perf_counter() - float(started))
+    return wait <= remaining
+
+
+def _sleep(seconds: float) -> None:
+    import time
+
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+def _skip_hint(exc: Exception) -> str:
+    from agent.llm.models import LLMRateLimitError, LLMTimeoutError, _is_rate_limit, _is_timeout
+
+    if isinstance(exc, LLMRateLimitError) or _is_rate_limit(exc):
+        return "Narrative skipped: Gemini rate limit (429)"
+    if isinstance(exc, LLMTimeoutError) or _is_timeout(exc):
+        return "Narrative skipped: Gemini timed out"
+    text = str(exc).lower()
+    if "404" in text or "not found" in text or "no longer available" in text:
+        return "Narrative skipped: model not found (404)"
+    if not str(exc).strip():
+        return "Narrative skipped: the model returned no usable narrative"
+    return "Narrative skipped: the model returned no usable narrative"
 
 
 def _llm_allowed(deps: Deps) -> bool:

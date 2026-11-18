@@ -52,3 +52,4 @@ class AgentState(TypedDict, total=False):
     partial: bool
     period_label: str
     period_note: str
+    narrative_skip: str

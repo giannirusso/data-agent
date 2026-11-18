@@ -87,6 +87,11 @@ def suspicious_reason(frame: dict) -> str | None:
 
 
 def _accept(state: dict, frame: dict) -> dict:
+    plan = state.get("plan") or []
+    step = int(state.get("current_step") or 0)
+    if step < len(plan) and plan[step].get("purpose"):
+        frame = dict(frame)
+        frame["purpose"] = plan[step].get("purpose")
     results = list(state.get("results") or [])
     results.append(frame)
     scanned = int(frame.get("bytes") or 0)

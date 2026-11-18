@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from agent.deps import Deps, status
-from agent.llm.models import LLMConfigError, LLMFatalError, LLMTimeoutError
+from agent.llm.models import LLMConfigError, LLMFatalError, LLMRateLimitError, LLMTimeoutError
 from agent.llm.parsing import extract_sql
 from agent.llm.prompts import SQL_SYSTEM
 from agent.safety.safe_schema import sql_prompt_schema
@@ -65,6 +65,14 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
             thinking_level="minimal",
             max_output_tokens=512,
         )
+    except LLMRateLimitError as exc:
+        return {
+            "fatal": "model_outage",
+            "stop_retry": True,
+            "last_error": "The model is busy right now.",
+            "attempts": attempts,
+            "retry_execute": False,
+        }
     except LLMTimeoutError as exc:
         return {
             "fatal": "model_timeout",

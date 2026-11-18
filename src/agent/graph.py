@@ -40,6 +40,7 @@ _DETAIL_KEYS = (
     "pii_hits",
     "persona_version",
     "stop_retry",
+    "prompt_chars",
 )
 
 

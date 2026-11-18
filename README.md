@@ -39,6 +39,8 @@ Initial targets, to be agreed with the client. The offline suite in this repo ga
 
 ---
 
+A line-by-line map of requirements to files, tests, and the exact prompts to type is in [`docs/REQUIREMENTS_CHECKLIST.md`](docs/REQUIREMENTS_CHECKLIST.md).
+
 ## 2. Prototype versus design
 
 | # | Requirement | In this repo | Design only |
@@ -263,10 +265,10 @@ Order of checks: sqlglot (local) → BigQuery dry run → execute with `maximum_
 - The same SQL string on the next attempt stops the loop.
 - Empty results are retried once with a casing and date-range hint, then answered as no data.
 - Suspicious results (negative revenue or margin, all-null rows, more than 1000 rows) are retried once, then the turn stops.
-- Gemini calls use a 20s timeout (`GEMINI_TIMEOUT_SECONDS`) and `thinking_level=low`. A simple question is two calls (SQL, then analysis). Planning runs only for "why" / compare / report questions, and it uses the Flash tier. The guard does not call the model unless the text already looks like a jailbreak.
+- Gemini calls time out after `GEMINI_TIMEOUT_SECONDS` (default 90). A simple question is two calls (SQL, then analysis). SQL uses `thinking_level=minimal`; analysis uses `low`. Planning runs only for "why" / compare / report questions, on the Flash tier. The guard does not call the model unless the text already looks like a jailbreak. See [Latency and limits](#latency-and-limits).
 - 429/503/timeouts retry once, then fall back to Flash when that id is different. A retired model id, 404, invalid key, or permission error is not retried and is not described as "busy".
 - The default model id is `gemini-3.8-flash` for both tiers. `gemini-2.5-*` returns 404 for new keys. `GEMINI_MODEL_PRO` is the configurable Pro-tier id; leave it on Flash unless you accept the extra latency.
-- A previous 257s turn with one small BigQuery job was two untimed `gemini-2.5-pro` calls (a thinking model) on a long prompt, not the warehouse. The answer footer lists each node's duration (`nodes: generate_sql 3.2s, execute 1.1s, …`). `/trace` shows the same spans.
+- The answer footer lists each node's duration. `/trace` shows the same spans, plus the SQL prompt size.
 - BigQuery credential and project errors stop immediately with a setup message. Transient warehouse errors are retried, then the user is told to `/retry`.
 - Successful frames are cached in-process, keyed by SQL + parameters + user.
 - `handle_message` catches unexpected exceptions, logs a masked error, prints `Something went wrong (trace …)`, and keeps the session open.
@@ -330,9 +332,10 @@ Alternatives considered: Google ADK / Vertex AI Agent Engine (credible on GCP, l
 ## 11. Repository
 
 ```
-README.md                          submission HLD, setup, illustrative session
+README.md                          submission HLD, setup, real run
 docs/HLD.md                        full design
 docs/architecture.md               Mermaid diagrams and the delete flow
+docs/REQUIREMENTS_CHECKLIST.md     requirement to file, test, and live prompt
 requirements.txt
 pyproject.toml
 .env.example                       no secrets
@@ -374,6 +377,19 @@ gcloud auth application-default login
 python -m agent.cli --user alice
 ```
 
+On Windows PowerShell, allow the venv activate script for this window only, then use the Windows path:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+pip install -e .
+copy .env.example .env
+gcloud auth application-default login
+python -m agent.cli --user alice
+```
+
 Without those credentials the CLI still starts. It will answer "what data is available?", manage reports, and explain why analysis cannot run. It will not traceback.
 
 Useful overrides:
@@ -382,7 +398,7 @@ Useful overrides:
 |---|---|
 | `GEMINI_MODEL_PRO` | SQL and analysis. Default `gemini-3.8-flash` (set a Pro id only if you want that latency) |
 | `GEMINI_MODEL_FLASH` | Fallback and planning. Default `gemini-3.8-flash` |
-| `GEMINI_TIMEOUT_SECONDS` | Per-request Gemini timeout. Default `20` |
+| `GEMINI_TIMEOUT_SECONDS` | Per-request Gemini timeout. Default `90` (free-tier SQL often needs this) |
 | `BQ_MAX_BYTES` | Dry-run ceiling and `maximum_bytes_billed`. Default `1000000000` |
 | `PII_SALT` | Salt inside `FARM_FINGERPRINT` |
 | `LLM_GUARD` | `suspicious` (default), `always`, or `off` |
@@ -408,58 +424,60 @@ docker run -it --env-file .env -v ~/.config/gcloud:/root/.config/gcloud retail-a
 
 ## 13. Example session
 
-**Illustrative only.** This transcript was not captured from Gemini or BigQuery. This environment had no Google API key and no GCP project, so it could not be. The offline tests and the no-credential REPL were run; see section 14.
+Real run on the Gemini free tier, 18 Nov 2026. User `alice` (Calvin Klein, Allegra K), model `gemini-3.8-flash`, one BigQuery query.
 
 ```text
-$ python -m agent.cli --user alice
-Retail Analyst Agent · user: alice · scope: Calvin Klein, Allegra K
-model: gemini-3.8-flash (fallback gemini-3.8-flash)
+you> What were our top 5 products by revenue last quarter?
 
-you> Why are users in Texas underspending compared to California?
-planning (3 steps)… querying BigQuery…
+| id    | name                                                          | revenue |
+| 20041 | Calvin Klein Mens 2 Button Solid Black Wool Suit              | 519.98  |
+| 20232 | Calvin Klein Body Mens Black Windowpane Slim Fit Wool Suit    | 399.98  |
+| 24113 | Calvin Klein Men's Traditional Coat                           | 398.00  |
+| 20090 | Calvin Klein Sportswear Men's Washable Pindot Jacket         | 356.00  |
+| 19831 | Calvin Klein Sportswear Men's Solid Classic Fit Sport Coat   | 339.00  |
 
-| State      | Revenue | Orders/customer | AOV |
-| California | …       | …               | …   |
-| Texas      | …       | …               | …   |
-
-Insight: the gap is driven by order frequency rather than basket size.
-Action items: 1) … 2) …
-Definitions: revenue = sale_price excluding Cancelled/Returned.
-Scope: Calvin Klein, Allegra K.
-Approach based on analyst report gb-0003.
-trace: 7f3a… · 3 queries · … bytes · … s
-
-you> Show me the emails of the top 10 customers
-I can't share personal details such as emails. I can show the same
-analysis by pseudonymous customer key with spend and order count.
-
-you> create a Q1 performance report with insights and action items
-… insights and action items …
-Saved as report #12 "Q1 Performance".
-
-you> delete all the reports we made in this conversation
-Found 2 reports from this conversation:
-  1) "Texas vs California spend" (…)
-  2) "Q1 Performance" (…)
-Delete them? [yes / numbers e.g. 1,3 / no]
-you> 1
-Deleted 1 report. Type /restore within 30 days to undo.
+Insight: the five products together are $2,012.96. The leading suit is about 26% of that top five.
+Approach based on analyst report gb-0002, gb-0011, gb-0007.
+trace: … · 1 queries · 8249316 bytes · 90.0s
+nodes: guard 0ms, route 1ms, retrieve 0ms, plan 0ms, generate_sql 76.0s, validate_sql 76ms, dry_run 2.7s, execute 1.7s, check_result 0ms, analyze 9.5s, mask 1ms
 ```
 
-What *was* run here, with no credentials:
+Product titles were not masked. Revenue is two decimals. The citation is the Golden Bucket stub (BM25), not a fabricated report id.
 
-```text
-you> what data is available?
-… products, order_items, orders, users …
-Not available: names, email, street address, postal code, latitude, longitude.
-Your current scope: Calvin Klein, Allegra K.
+A 20 second timeout aborted `generate_sql` twice on this same question before the timeout was raised. The 76 second call is one successful request, not a retry loop: validate, dry-run, and execute were each a single pass.
 
-you> Show me the emails of the top 10 customers
-I can't share personal details such as emails, phone numbers, or street addresses. …
+---
 
-you> Monthly revenue in 2023
-I can't reach Gemini because GOOGLE_API_KEY is not set. …
-```
+## Latency and limits
+
+Free-tier `gemini-3.8-flash`, measured on that run:
+
+| Node | Time | What it is |
+|---|---|---|
+| guard, route, retrieve, plan, check, mask | under 2 ms | Local. "Top 5 products" is one step, so the planner does not call the model (`plan 0ms`). |
+| generate_sql | 76.0 s | First Gemini call. Writes the SELECT. |
+| validate_sql | 76 ms | sqlglot, local. |
+| dry_run | 2.7 s | BigQuery dry run, 8.2 MB, under the 1 GB cap. |
+| execute | 1.7 s | The only billed query. |
+| analyze | 9.5 s | Second Gemini call. Five rows in, a short insight out. |
+| Total | 90.0 s | Dominated by the first model call. |
+
+Why SQL is much slower than analysis on the same model: `thinking_level=low` was already set on both calls, and neither call uses structured output. The prompts are the same order of magnitude (a short schema plus one trio, versus five result rows). The gap is the free-tier queue on the first request, plus the model doing more reasoning to write SQL ("last quarter", joins, `ROUND`, `LIMIT`) than to summarise five numbers. The follow-up call is warm, which is why analysis was 9.5 s.
+
+What we changed after that run, without a new live measurement: SQL calls now request `thinking_level=minimal` and at most 512 output tokens, and the SQL prompt drops empty "previous error" sections. The default timeout is 90 s so a 76 s call is not aborted. A 20 s cap timed out twice and never reached BigQuery.
+
+Production mitigations, not in this prototype:
+
+- A paid Gemini tier or provisioned throughput, so the first call is not sitting in the free-tier queue.
+- A smaller or non-thinking model for SQL only, with Flash or Pro reserved for the narrative.
+- Prompt and result caching (the prototype already caches identical BigQuery frames in memory; it does not cache Gemini responses).
+- Streaming the analysis tokens so the wait is visible. The CLI today blocks until the call returns.
+
+---
+
+## How this was built
+
+Djanibek Khudaybergenov wrote the architecture and the safety design (the HLD, the four safety layers, the delete confirmation rules, and the requirement split between prototype and design). The Python in this repository was generated by a Cursor AI agent under his direction. He reviewed it, ran it live against Gemini and BigQuery, and sent back the failures that changed the code: the PII masker was eating product titles, the first model was a retired id, a 20 second timeout was too short for free-tier SQL, and a 404 was reported as "the model is busy." Those fixes are his review, not an unattended run. The framework-experience paragraph in [Framework choice](#10-framework-choice) still has his placeholder; replace it with your own background before you submit.
 
 ---
 
@@ -472,11 +490,13 @@ Verified in this environment:
 - A piped REPL as `alice` with no `GOOGLE_API_KEY` and no `GCP_PROJECT`: banner explains both, schema and `/whoami` work, the email request is refused, `/exit` returns 0.
 - `python evals/run_eval.py`: red-team 6/6, SQL rejections 4/4, PII leak count 0. Execution accuracy is printed as `n/a`.
 
-Not verified, because this environment has no Google AI Studio key and no BigQuery billing project:
+Verified live on 18 Nov 2026 (free-tier `gemini-3.8-flash`, user alice): the top-5 product question in section 13, including Golden Bucket citations, two-decimal revenue, unmasked product names, one dry run, and one execute. Node times are from that run.
 
-- A live SQL answer, byte counts, or latency against `thelook_ecommerce`.
-- A real Gemini retry against a 429 from Google.
-- LangFuse export.
-- The Docker image against a live project.
+Not verified live:
 
-Do not treat section 13's first transcript as a measured run.
+- The failure paths (bad SQL retry, empty result, 429, BigQuery down). Those are covered by offline tests.
+- A side-by-side alice/bob brand check. Alice's rows were all Calvin Klein, which matches her entitlement, but Bob was not run in that session.
+- The delete confirmation prompts and the Q1 report prompt. Routing and the interrupt flow are tested offline.
+- LangFuse export, and the Docker image against a live project.
+
+The SQL-call change after that run (`thinking_level=minimal`, shorter prompt, 90 s timeout) has not been timed live.

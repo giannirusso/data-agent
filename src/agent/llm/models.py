@@ -144,13 +144,27 @@ class ModelProvider:
     def available(self) -> bool:
         return self._complete is not None or bool(self.settings.google_api_key)
 
-    def generate(self, *, tier: str, system: str, user: str) -> str:
+    def generate(
+        self,
+        *,
+        tier: str,
+        system: str,
+        user: str,
+        thinking_level: str | None = None,
+        max_output_tokens: int | None = None,
+    ) -> str:
         primary = tier if tier in {"pro", "flash"} else "flash"
         if primary == "pro" and not self.breaker.allow(self.clock()):
             self.fallback_used = True
             primary = "flash"
         try:
-            text = self._call(primary, system, user)
+            text = self._call(
+                primary,
+                system,
+                user,
+                thinking_level=thinking_level,
+                max_output_tokens=max_output_tokens,
+            )
             if primary == "pro":
                 self.breaker.record_success()
             return text
@@ -158,7 +172,13 @@ class ModelProvider:
             if primary == "flash" or self._same_model():
                 raise
             self.fallback_used = True
-            return self._call("flash", system, user)
+            return self._call(
+                "flash",
+                system,
+                user,
+                thinking_level=thinking_level,
+                max_output_tokens=max_output_tokens,
+            )
         except Exception as first:
             if primary == "flash" or self._same_model():
                 if isinstance(first, LLMTransientError):
@@ -167,7 +187,13 @@ class ModelProvider:
             self.fallback_used = True
             self.breaker.record_failure(self.clock())
             try:
-                return self._call("flash", system, user)
+                return self._call(
+                    "flash",
+                    system,
+                    user,
+                    thinking_level=thinking_level,
+                    max_output_tokens=max_output_tokens,
+                )
             except LLMConfigError:
                 raise
             except Exception as second:
@@ -181,7 +207,14 @@ class ModelProvider:
             return self.settings.gemini_model_pro
         return self.settings.gemini_model_flash
 
-    def _call(self, tier: str, system: str, user: str) -> str:
+    def _call(
+        self,
+        tier: str,
+        system: str,
+        user: str,
+        thinking_level: str | None = None,
+        max_output_tokens: int | None = None,
+    ) -> str:
         wait = wait_fixed(0) if self.retry_min <= 0 else wait_exponential(multiplier=self.retry_min, min=self.retry_min, max=self.retry_max)
 
         @retry(
@@ -195,7 +228,13 @@ class ModelProvider:
             try:
                 if self._complete is not None:
                     return self._complete(system, user, tier)
-                return self._invoke_gemini(tier, system, user)
+                return self._invoke_gemini(
+                    tier,
+                    system,
+                    user,
+                    thinking_level=thinking_level,
+                    max_output_tokens=max_output_tokens,
+                )
             except LLMConfigError:
                 raise
             except LLMTransientError:
@@ -209,15 +248,27 @@ class ModelProvider:
 
         return attempt()
 
-    def _invoke_gemini(self, tier: str, system: str, user: str) -> str:
+    def _invoke_gemini(
+        self,
+        tier: str,
+        system: str,
+        user: str,
+        thinking_level: str | None = None,
+        max_output_tokens: int | None = None,
+    ) -> str:
         if not self.settings.google_api_key:
             raise LLMFatalError("GOOGLE_API_KEY is not set.")
         model = self._gemini(tier)
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        kwargs: dict = {"timeout": self.settings.gemini_timeout_seconds}
+        if thinking_level:
+            kwargs["thinking_level"] = thinking_level
+        if max_output_tokens:
+            kwargs["max_output_tokens"] = max_output_tokens
         message = model.invoke(
             [SystemMessage(content=system), HumanMessage(content=user)],
-            timeout=self.settings.gemini_timeout_seconds,
+            **kwargs,
         )
         content = message.content
         if isinstance(content, str):
@@ -244,8 +295,8 @@ class ModelProvider:
             temperature=0,
             max_retries=0,
             timeout=self.settings.gemini_timeout_seconds,
-            # Gemini 3 defaults to a deep thinking level. "low" keeps SQL and
-            # analysis inside a few seconds instead of minutes.
+            # Gemini 3 defaults to a deep thinking level. "low" is the base.
+            # SQL calls override this with "minimal" (see generate_sql).
             thinking_level="low",
             max_output_tokens=1024,
         )

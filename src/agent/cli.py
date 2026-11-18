@@ -199,6 +199,8 @@ def _show_trace(runtime: Runtime, trace_id: str) -> str:
             bits.append("sql " + str(details.get("rewritten_sql") or details.get("sql"))[:240])
         if details.get("attempts"):
             bits.append(f"attempt {details['attempts']}")
+        if details.get("prompt_chars"):
+            bits.append(f"prompt {details['prompt_chars']} chars")
         lines.append("- " + " — ".join(bits))
     return "\n".join(lines)
 

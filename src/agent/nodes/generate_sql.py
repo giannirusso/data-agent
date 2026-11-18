@@ -33,25 +33,34 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
             "retry_execute": False,
         }
 
+    parts = [
+        f"Sub-question: {sub.get('question')}",
+        f"Original question: {state.get('user_text')}",
+        "Schema:\n" + sql_prompt_schema(),
+        "Metrics:\n" + _metrics(deps),
+    ]
     shown = (state.get("golden_trios") or [])[:1]
-    trios = "\n\n".join(
-        f"Example {trio.get('id')}: {trio.get('question')}\n{(trio.get('sql') or '')[:400]}"
-        for trio in shown
-    )
-    previous_sql = state.get("sql") or ""
-    user = "\n\n".join(
-        [
-            f"Sub-question: {sub.get('question')}",
-            f"Original question: {state.get('user_text')}",
-            "Schema:\n" + sql_prompt_schema(),
-            "Metric notes:\n" + _metrics(deps),
-            "Analyst example:\n" + (trios or "(none)"),
-            "Previous SQL:\n" + (previous_sql[:500] or "(none)"),
-            "Previous error:\n" + (state.get("last_error") or "(none)"),
-        ]
-    )
+    if shown:
+        trio = shown[0]
+        parts.append(
+            "Analyst example "
+            f"{trio.get('id')}: {trio.get('question')}\n{(trio.get('sql') or '')[:240]}"
+        )
+    previous_error = state.get("last_error") or ""
+    if previous_error:
+        parts.append("Previous SQL:\n" + (state.get("sql") or "")[:500])
+        parts.append("Previous error:\n" + previous_error)
+    user = "\n\n".join(parts)
     try:
-        raw = deps.models.generate(tier="pro", system=SQL_SYSTEM, user=user)
+        # SQL is the first model call and the slow one on the free tier.
+        # "minimal" is below the default "low" used for the short analysis call.
+        raw = deps.models.generate(
+            tier="pro",
+            system=SQL_SYSTEM,
+            user=user,
+            thinking_level="minimal",
+            max_output_tokens=512,
+        )
     except LLMConfigError as exc:
         return {
             "fatal": "model_config",
@@ -81,6 +90,7 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
         "retry_dry": False,
         "cache_hit": False,
         "last_error": None if sql and not repeated else state.get("last_error"),
+        "prompt_chars": len(SQL_SYSTEM) + len(user),
     }
 
 

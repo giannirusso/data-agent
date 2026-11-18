@@ -36,7 +36,9 @@ class Settings(BaseSettings):
     # inside a few seconds per call. Point GEMINI_MODEL_PRO at a Pro id to trade latency.
     gemini_model_pro: str = "gemini-3.8-flash"
     gemini_model_flash: str = "gemini-3.8-flash"
-    gemini_timeout_seconds: int = 20
+    # Free-tier gemini-3.8-flash often needs 60–90s for the first SQL call.
+    # A 20s cap aborted a call that then succeeded at 76s.
+    gemini_timeout_seconds: int = 90
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"

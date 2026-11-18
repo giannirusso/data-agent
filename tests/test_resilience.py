@@ -17,6 +17,18 @@ VALID = (
 )
 
 
+def test_assignment_phrases_route_without_a_model():
+    from agent.nodes.route import heuristic_intent
+
+    report = "create a report for Q1 including insights and action items for Q2"
+    assert heuristic_intent(report, has_results=False) == "report"
+    assert heuristic_intent("Delete all reports mentioning Client X", has_results=False) == "report_delete"
+    assert (
+        heuristic_intent("Delete all the reports we made in this conversation", has_results=False)
+        == "report_delete"
+    )
+
+
 def test_bad_sql_is_fixed_on_retry(settings):
     bq = FakeBQ()
     replies = iter(

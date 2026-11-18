@@ -22,6 +22,8 @@ def test_assignment_phrases_route_without_a_model():
 
     report = "create a report for Q1 including insights and action items for Q2"
     assert heuristic_intent(report, has_results=False) == "report"
+    assert heuristic_intent("Q1 report", has_results=False) == "report"
+    assert heuristic_intent("quarterly report for Q3 with action items", has_results=False) == "report"
     assert heuristic_intent("Delete all reports mentioning Client X", has_results=False) == "report_delete"
     assert (
         heuristic_intent("Delete all the reports we made in this conversation", has_results=False)
@@ -209,22 +211,12 @@ def test_negative_revenue_is_retried(settings):
 
 def test_report_plans_several_steps_and_cites_a_trio(settings):
     bq = FakeBQ()
-    step = {"n": 0}
+    calls = {"n": 0}
 
     def complete(system, user, tier):
-        if "PURPOSE: plan" in system:
-            return json.dumps(
-                {
-                    "subquestions": [
-                        {"question": "Q1 revenue by month", "purpose": "revenue"},
-                        {"question": "Top categories in Q1", "purpose": "categories"},
-                        {"question": "Return rate in Q1", "purpose": "returns"},
-                    ]
-                }
-            )
-        if "PURPOSE: sql" in system:
-            step["n"] += 1
-            return VALID + f" /* step {step['n']} */"
+        calls["n"] += 1
+        assert "PURPOSE: plan" not in system
+        assert "PURPOSE: sql" not in system
         return (
             "Insights: Q1 revenue is in the tables. "
             "Action items: 1) review returns 2) plan Q2.\nTITLE: Q1 Performance"
@@ -235,13 +227,14 @@ def test_report_plans_several_steps_and_cites_a_trio(settings):
         runtime,
         "Create a Q1 performance report with insights and action items",
     )
-    assert bq.execute_count == 3
+    assert calls["n"] == 1
+    assert bq.execute_count == 6
     assert "Action items" in reply
     assert "Saved as report #" in reply
     assert "gb-" in reply
     log = Path(settings.log_path).read_text(encoding="utf-8")
     assert "gb-" in log
-    assert '"steps": 3' in log or '"steps":3' in log
+    assert '"steps": 6' in log or '"steps":6' in log
 
 
 def test_unauthorized_brand_does_not_query(settings):

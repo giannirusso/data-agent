@@ -209,6 +209,11 @@ def _new_turn(runtime: Runtime, text: str) -> str:
     trace_id = uuid.uuid4().hex[:12]
     runtime.trace_id = trace_id
     started = time.perf_counter()
+    runtime.deps.turn_started = started
+    runtime.deps.models.turn_started = started
+    runtime.deps.models.llm_calls = 0
+    runtime.deps.models.max_llm_calls = runtime.settings.max_llm_calls
+    runtime.deps.models.turn_budget_s = runtime.settings.turn_budget_seconds
     payload = {
         "user_id": runtime.user_id,
         "role": runtime.role,

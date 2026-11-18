@@ -31,6 +31,7 @@ class Deps:
     cache: QueryCache
     clock: Callable[[], float] = time.time
     on_status: Callable[[str], None] | None = None
+    turn_started: float = 0.0
 
 
 def status(deps: Deps, message: str) -> None:

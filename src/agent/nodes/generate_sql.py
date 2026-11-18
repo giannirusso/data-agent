@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from agent.deps import Deps, status
-from agent.llm.models import LLMConfigError, LLMFatalError
+from agent.llm.models import LLMConfigError, LLMFatalError, LLMTimeoutError
 from agent.llm.parsing import extract_sql
 from agent.llm.prompts import SQL_SYSTEM
 from agent.safety.safe_schema import sql_prompt_schema
@@ -23,7 +23,11 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
             "attempts": attempts,
         }
     sub = plan[step]
+    if sub.get("template") and sub.get("sql"):
+        return _template_step(state, sub, attempts)
     status(deps, f"writing query {step + 1}/{len(plan)} (attempt {attempts})")
+    if _turn_expired(deps) and state.get("results"):
+        return {"partial": True, "stop_retry": True, "fatal": None, "last_error": None, "attempts": attempts}
     if not deps.models.available():
         return {
             "fatal": "no_model",
@@ -61,6 +65,14 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
             thinking_level="minimal",
             max_output_tokens=512,
         )
+    except LLMTimeoutError as exc:
+        return {
+            "fatal": "model_timeout",
+            "stop_retry": True,
+            "last_error": str(exc),
+            "attempts": attempts,
+            "retry_execute": False,
+        }
     except LLMConfigError as exc:
         return {
             "fatal": "model_config",
@@ -92,6 +104,44 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
         "last_error": None if sql and not repeated else state.get("last_error"),
         "prompt_chars": len(SQL_SYSTEM) + len(user),
     }
+
+
+def _template_step(state: dict, sub: dict, attempts: int) -> dict:
+    """Use the pre-written statement. A second pass with the same error gives up."""
+    sql = str(sub.get("sql") or "").strip()
+    if state.get("last_error"):
+        return {
+            "template_sql": True,
+            "stop_retry": True,
+            "fatal": None,
+            "last_error": state.get("last_error"),
+            "attempts": attempts,
+            "sql": sql,
+        }
+    fingerprint = hashlib.sha256(sql.encode()).hexdigest()
+    return {
+        "sql": sql,
+        "template_sql": True,
+        "step_params": dict(sub.get("params") or {}),
+        "attempts": attempts,
+        "stop_retry": False,
+        "fatal": None,
+        "last_error": None,
+        "sql_fingerprint": fingerprint,
+        "retry_execute": False,
+        "retry_dry": False,
+        "cache_hit": False,
+    }
+
+
+def _turn_expired(deps: Deps) -> bool:
+    started = getattr(deps, "turn_started", 0) or 0
+    budget = getattr(deps.settings, "turn_budget_seconds", 0) or 0
+    if not started or not budget:
+        return False
+    import time
+
+    return (time.perf_counter() - started) > budget
 
 
 def _metrics(deps: Deps) -> str:

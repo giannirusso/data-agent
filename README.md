@@ -466,6 +466,8 @@ Why SQL is much slower than analysis on the same model: `thinking_level=low` was
 
 What we changed after that run, without a new live measurement: SQL calls now request `thinking_level=minimal` and at most 512 output tokens, and the SQL prompt drops empty "previous error" sections. The default timeout is 90 s so a 76 s call is not aborted. A 20 s cap timed out twice and never reached BigQuery.
 
+A later live run of `create a report for Q1 including insights and action items for Q2` spent 177 s in an LLM planner and then timed out in `generate_sql` at 90 s (268 s total) and returned "the model is busy." Reports no longer do that. The planner is a fixed six-query template (month, products, categories, returns, new versus returning customers, quarter versus the previous quarter). Dates are query parameters. Each statement still goes through the SQL gate, the brand rewrite, the dry run, and the byte cap. There is one narrative call. If that call times out, the report is still saved from the numbers, and the action items are labeled template-based. A timeout now says it timed out and suggests `/retry`, instead of calling the model busy. A turn is capped at 3 model calls and 150 seconds; if the budget runs out after some queries, the answer uses the rows already in hand.
+
 Production mitigations, not in this prototype:
 
 - A paid Gemini tier or provisioned throughput, so the first call is not sitting in the free-tier queue.

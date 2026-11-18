@@ -41,6 +41,8 @@ def heuristic_intent(text: str, *, has_results: bool) -> str:
         lowered,
     ):
         return "report"
+    if re.search(r"\b(q\s*[1-4]|quarterly|quarter)\b", lowered) and re.search(r"\breports?\b", lowered):
+        return "report"
     if lowered in {"hi", "hello", "hey", "thanks", "thank you", "help"} or lowered.startswith("what can you"):
         return "chitchat"
     if has_results and re.match(

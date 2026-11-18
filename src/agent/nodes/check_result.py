@@ -6,7 +6,15 @@ from agent.deps import Deps, status
 
 
 def check_result_node(state: dict, deps: Deps) -> dict:
-    frame = state.get("pending_frame") or {}
+    frame = dict(state.get("pending_frame") or {})
+    if state.get("template_sql"):
+        if int(frame.get("row_count") or 0) == 0:
+            frame["legitimately_empty"] = True
+            frame["empty"] = True
+        accepted = _accept(state, frame)
+        if _budget_spent(deps):
+            accepted["partial"] = True
+        return accepted
     reason = suspicious_reason(frame)
     row_count = int(frame.get("row_count") or 0)
     attempts = int(state.get("attempts") or 0)
@@ -49,6 +57,16 @@ def check_result_node(state: dict, deps: Deps) -> dict:
         }
 
     return _accept(state, frame)
+
+
+def _budget_spent(deps: Deps) -> bool:
+    import time
+
+    started = getattr(deps, "turn_started", 0) or 0
+    budget = getattr(deps.settings, "turn_budget_seconds", 0) or 0
+    if not started or not budget:
+        return False
+    return (time.perf_counter() - float(started)) > budget
 
 
 def suspicious_reason(frame: dict) -> str | None:

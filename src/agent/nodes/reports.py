@@ -77,6 +77,11 @@ def give_up_node(state: dict, deps: Deps) -> dict:
         message = state.get("last_error") or (
             "The configured model is not available. Set GEMINI_MODEL_PRO and GEMINI_MODEL_FLASH in .env."
         )
+    elif fatal == "model_timeout":
+        message = (
+            "The model timed out before it finished. "
+            "Try `/retry`, or ask for one metric and a shorter period."
+        )
     elif fatal == "model_outage":
         message = "The model is busy right now. Try again in a minute with `/retry`."
     elif fatal == "no_scope":

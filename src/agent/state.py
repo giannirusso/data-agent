@@ -47,3 +47,8 @@ class AgentState(TypedDict, total=False):
     scope_note: str
     persona_version: str
     query_params: dict
+    step_params: dict
+    template_sql: bool
+    partial: bool
+    period_label: str
+    period_note: str

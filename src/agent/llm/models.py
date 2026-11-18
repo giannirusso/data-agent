@@ -26,6 +26,10 @@ class LLMFatalError(Exception):
     pass
 
 
+class LLMTimeoutError(LLMFatalError):
+    """The call or the turn budget ran out. This is not a 429."""
+
+
 class LLMConfigError(LLMFatalError):
     """Model id, key, or permission problem. Not retried and not called 'busy'."""
 
@@ -88,10 +92,23 @@ def is_transient(exc: Exception) -> bool:
     except (TypeError, ValueError):
         pass
     text = str(exc).lower()
+    if any(token in text for token in ("timeout", "timed out", "deadline exceeded")):
+        return False
     return any(
         token in text
-        for token in ("429", "500", "502", "503", "504", "timeout", "resource exhausted", "rate limit", "service unavailable")
+        for token in ("429", "500", "502", "503", "504", "resource exhausted", "rate limit", "service unavailable")
     )
+
+
+def _is_timeout(exc: Exception) -> bool:
+    current: BaseException | None = exc
+    seen: list[BaseException] = []
+    while current is not None and current not in seen:
+        if any(token in str(current).lower() for token in ("timeout", "timed out", "deadline exceeded")):
+            return True
+        seen.append(current)
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def config_message(model_id: str, exc: Exception) -> str:
@@ -140,6 +157,10 @@ class ModelProvider:
         # One retry on 429/503. A 20s timeout times three retries times two
         # tiers was enough to turn a retired model id into a multi-minute wait.
         self.max_attempts = 2
+        self.llm_calls = 0
+        self.max_llm_calls = 0
+        self.turn_started = 0.0
+        self.turn_budget_s = 0.0
 
     def available(self) -> bool:
         return self._complete is not None or bool(self.settings.google_api_key)
@@ -152,8 +173,15 @@ class ModelProvider:
         user: str,
         thinking_level: str | None = None,
         max_output_tokens: int | None = None,
+        max_attempts: int | None = None,
     ) -> str:
         primary = tier if tier in {"pro", "flash"} else "flash"
+        if self.max_llm_calls and self.llm_calls >= self.max_llm_calls:
+            raise LLMTimeoutError("The model call cap for this turn was reached. Try `/retry`.")
+        if self.turn_started and self.turn_budget_s:
+            if (time.perf_counter() - self.turn_started) > self.turn_budget_s:
+                raise LLMTimeoutError("The turn timed out before the model answered. Try `/retry`.")
+        self.llm_calls += 1
         if primary == "pro" and not self.breaker.allow(self.clock()):
             self.fallback_used = True
             primary = "flash"
@@ -164,10 +192,13 @@ class ModelProvider:
                 user,
                 thinking_level=thinking_level,
                 max_output_tokens=max_output_tokens,
+                max_attempts=max_attempts,
             )
             if primary == "pro":
                 self.breaker.record_success()
             return text
+        except LLMTimeoutError:
+            raise
         except LLMConfigError:
             if primary == "flash" or self._same_model():
                 raise
@@ -180,6 +211,8 @@ class ModelProvider:
                 max_output_tokens=max_output_tokens,
             )
         except Exception as first:
+            if _is_timeout(first):
+                raise LLMTimeoutError("The model timed out. Try `/retry`.") from first
             if primary == "flash" or self._same_model():
                 if isinstance(first, LLMTransientError):
                     raise LLMFatalError("The model is busy right now.") from first
@@ -214,12 +247,14 @@ class ModelProvider:
         user: str,
         thinking_level: str | None = None,
         max_output_tokens: int | None = None,
+        max_attempts: int | None = None,
     ) -> str:
         wait = wait_fixed(0) if self.retry_min <= 0 else wait_exponential(multiplier=self.retry_min, min=self.retry_min, max=self.retry_max)
+        attempts = max_attempts or self.max_attempts
 
         @retry(
             reraise=True,
-            stop=stop_after_attempt(self.max_attempts),
+            stop=stop_after_attempt(attempts),
             wait=wait,
             retry=retry_if_exception_type(LLMTransientError),
         )
@@ -242,6 +277,8 @@ class ModelProvider:
             except Exception as exc:
                 if is_config_error(exc):
                     raise LLMConfigError(config_message(self._model_id(tier), exc), model_id=self._model_id(tier)) from exc
+                if _is_timeout(exc):
+                    raise LLMTimeoutError("The model timed out. Try `/retry`.") from exc
                 if is_transient(exc):
                     raise LLMTransientError(str(exc), getattr(exc, "status_code", None)) from exc
                 raise

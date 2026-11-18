@@ -69,6 +69,8 @@ def build_graph(deps: Deps, checkpointer):
         }.get(state.get("intent") or "", "retrieve")
 
     def after_generate(state: dict) -> str:
+        if state.get("partial"):
+            return "analyze"
         if state.get("fatal") or state.get("stop_retry"):
             return "give_up"
         return "validate_sql"
@@ -107,6 +109,8 @@ def build_graph(deps: Deps, checkpointer):
         return "check_result"
 
     def after_check(state: dict) -> str:
+        if state.get("partial"):
+            return "analyze"
         if state.get("fatal") or (state.get("stop_retry") and state.get("last_error")):
             return "give_up"
         if state.get("last_error"):

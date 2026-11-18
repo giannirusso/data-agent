@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -154,9 +155,18 @@ def _query_parameters(params: dict[str, Any] | None):
             bound.append(bigquery.ScalarQueryParameter(key, "INT64", value))
         elif isinstance(value, float):
             bound.append(bigquery.ScalarQueryParameter(key, "FLOAT64", value))
+        elif key in {"period_start", "period_end", "previous_start"}:
+            bound.append(bigquery.ScalarQueryParameter(key, "TIMESTAMP", _as_timestamp(value)))
         else:
             bound.append(bigquery.ScalarQueryParameter(key, "STRING", "" if value is None else str(value)))
     return bound
+
+
+def _as_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    text = str(value).replace("Z", "+00:00")
+    return datetime.fromisoformat(text)
 
 
 def _wrap(exc: Exception) -> BigQueryRunnerError:

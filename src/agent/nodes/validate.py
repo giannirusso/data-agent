@@ -30,5 +30,6 @@ def validate_node(state: dict, deps: Deps) -> dict:
         "query_params": {
             "entitled_brands": list(state.get("entitled_brands") or []),
             "pii_salt": deps.settings.pii_salt,
+            **dict(state.get("step_params") or {}),
         },
     }

@@ -6,6 +6,8 @@ import re
 
 from agent.deps import Deps, status
 from agent.llm.prompts import ANALYZE_SYSTEM
+from agent.reports.period import parse_period
+from agent.reports.templates import template_summary
 from agent.safety.pii_masker import collect_pii_values
 
 
@@ -61,15 +63,63 @@ def _frames(state: dict) -> list:
 def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list | None = None) -> str:
     frames = list(frames if frames is not None else _frames(state))
     trios = state.get("golden_trios") or []
-    if deps.models.available() and frames:
+    is_report = state.get("intent") == "report" or state.get("save_report") or state.get("template_sql")
+    if is_report:
+        text = _report_narrative(state, deps, persona, prefs, frames, trios)
+        return _with_citation(text, trios)
+    if deps.models.available() and frames and _llm_allowed(deps):
         user = _analyze_prompt(state, persona, prefs, frames, trios)
         try:
-            text = deps.models.generate(tier="pro", system=ANALYZE_SYSTEM, user=user)
+            text = deps.models.generate(tier="pro", system=ANALYZE_SYSTEM, user=user, thinking_level="minimal")
             if text and text.strip():
                 return _with_citation(text.strip(), trios)
         except Exception:
             pass
     return _with_citation(_fallback(state, frames), trios)
+
+
+def _report_narrative(state, deps, persona, prefs, frames, trios) -> str:
+    """One model call. A timeout or the call cap still returns a saved report."""
+    period = parse_period(state.get("user_text") or "")
+    note = state.get("period_note") or period.note
+    fallback = template_summary(period, frames)
+    if note and note not in fallback:
+        fallback = note + "\n\n" + fallback
+    if not frames or not deps.models.available() or not _llm_allowed(deps):
+        return fallback
+    user = _analyze_prompt(state, persona, prefs, frames, trios)
+    user += (
+        f"\n\nThis is a saved quarterly report for {period.label}. "
+        "Include insights and numbered action items for the following quarter. "
+        f"State this assumption: {note}"
+    )
+    try:
+        text = deps.models.generate(
+            tier="pro",
+            system=ANALYZE_SYSTEM,
+            user=user,
+            thinking_level="minimal",
+            max_output_tokens=700,
+            max_attempts=1,
+        )
+    except Exception:
+        return fallback
+    if not text or not text.strip():
+        return fallback
+    body = text.strip()
+    if note not in body:
+        body += "\n\n" + note
+    return body
+
+
+def _llm_allowed(deps: Deps) -> bool:
+    import time
+
+    started = getattr(deps, "turn_started", 0) or 0
+    budget = getattr(deps.settings, "turn_budget_seconds", 0) or 0
+    if started and budget and (time.perf_counter() - float(started)) > budget:
+        return False
+    return True
 
 
 def _analyze_prompt(state, persona, prefs, frames, trios) -> str:

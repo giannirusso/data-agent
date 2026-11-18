@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     bq_dataset: str = "bigquery-public-data.thelook_ecommerce"
     bq_timeout_seconds: int = 120
     max_sql_attempts: int = 3
+    max_llm_calls: int = 3
+    turn_budget_seconds: int = 150
     max_rows: int = 1000
     max_subquestions: int = 6
     delete_ttl_seconds: int = 600

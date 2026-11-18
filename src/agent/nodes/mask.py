@@ -5,13 +5,18 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage
 
 from agent.deps import Deps, status
-from agent.safety.pii_masker import collect_pii_values
+from agent.safety.pii_masker import collect_display_values, collect_pii_values
 
 
 def mask_node(state: dict, deps: Deps) -> dict:
     status(deps, "masking")
     raw = state.get("response") or ""
-    masked = deps.masker.mask(raw, extra_names=collect_pii_values(state.get("results")))
+    frames = state.get("results")
+    masked = deps.masker.mask(
+        raw,
+        extra_names=collect_pii_values(frames),
+        protected=collect_display_values(frames) | set(deps.known_brands or []),
+    )
     deps.logger.span(
         trace_id=state.get("trace_id") or "",
         span="turn",
@@ -30,6 +35,7 @@ def mask_node(state: dict, deps: Deps) -> dict:
             "golden_ids": [trio.get("id") for trio in state.get("golden_trios") or []],
             "fatal": state.get("fatal"),
             "narrative_skip": state.get("narrative_skip"),
+            "narrative_detail": state.get("narrative_detail"),
             "error_kind": state.get("error_kind"),
             "golden_template": state.get("golden_template"),
             "last_error": state.get("last_error"),

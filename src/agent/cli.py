@@ -192,6 +192,8 @@ def _show_trace(runtime: Runtime, trace_id: str) -> str:
             bits.append(f"sql: golden template {details['golden_template']}")
         if details.get("error_kind"):
             bits.append(str(details["error_kind"]))
+        if details.get("narrative_detail"):
+            bits.append(str(details["narrative_detail"])[:180])
         if details.get("golden_ids"):
             bits.append("trios " + ", ".join(details["golden_ids"]))
         if details.get("row_count") is not None:

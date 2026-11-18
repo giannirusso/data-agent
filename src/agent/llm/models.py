@@ -166,6 +166,32 @@ def _thinking_rejected(exc: BaseException) -> bool:
     return False
 
 
+def _message_text(content) -> str:
+    """Read model content. An empty string is empty content; a non-text payload is a parse failure."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text") or ""))
+            else:
+                piece = getattr(item, "text", None)
+                if piece:
+                    parts.append(str(piece))
+        if not "".join(parts).strip():
+            raise LLMFatalError("parse failure: model content had no text parts")
+        return "".join(parts)
+    if content is None:
+        raise LLMFatalError("parse failure: model content was empty")
+    text = str(content).strip()
+    if not text or text in {"None", "[]", "{}"}:
+        raise LLMFatalError(f"parse failure: model content was {type(content).__name__}")
+    return str(content)
+
+
 def timeout_message(seconds: int) -> str:
     return (
         f"Gemini timed out after {int(seconds)}s (free tier is slow). "
@@ -411,18 +437,7 @@ class ModelProvider:
             kwargs,
             timeout,
         )
-        content = message.content
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    parts.append(str(item.get("text") or ""))
-            return "".join(parts)
-        return str(content)
+        return _message_text(message.content)
 
     def _invoke_with_deadline(self, model, messages, kwargs: dict, timeout: int):
         """Stop the call at GEMINI_TIMEOUT_SECONDS even if the client timeout is ignored."""

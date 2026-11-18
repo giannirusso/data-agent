@@ -34,6 +34,29 @@ def test_does_not_mask_brand_or_state_names():
     assert "Texas" in masked
 
 
+def test_branded_product_titles_are_not_names():
+    brands = {"Tommy Hilfiger", "Calvin Klein", "Allegra K"}
+    masker = PiiMasker(
+        known_names={"Tommy", "Hilfiger", "Calvin", "Klein", "Allegra", "Tommy Hilfiger"},
+        brands=brands,
+    )
+    titles = [
+        "Tommy Hilfiger Men's Houndstooth Trim Fit Suit",
+        "Calvin Klein Mens 2 Button Solid Black Wool Suit",
+        "Allegra K Women's Cropped Moto Jacket",
+    ]
+    for title in titles:
+        assert masker.mask(title).text == title
+        labeled = f"name {title}"
+        assert masker.mask(labeled).text == labeled
+        assert "[NAME]" not in masker.mask(labeled, protected={title}).text
+    sentence = "Customer Jane Doe bought the Tommy Hilfiger Men's Houndstooth Trim Fit Suit."
+    masked = masker.mask(sentence, extra_names={"Jane Doe"}, protected=set(titles))
+    assert "Jane Doe" not in masked.text
+    assert "Tommy Hilfiger Men's Houndstooth Trim Fit Suit" in masked.text
+    assert "[NAME]" in masked.text
+
+
 def test_product_and_category_text_is_not_a_name():
     masker = PiiMasker()
     product = "Calvin Klein Mens 2 Button Solid Black Wool Suit"

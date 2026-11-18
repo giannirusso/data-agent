@@ -8,7 +8,7 @@ from agent.deps import Deps, status
 from agent.llm.prompts import ANALYZE_SYSTEM
 from agent.reports.period import parse_period
 from agent.reports.templates import template_summary
-from agent.safety.pii_masker import collect_pii_values
+from agent.safety.pii_masker import collect_display_values, collect_pii_values
 
 
 def analyze_node(state: dict, deps: Deps) -> dict:
@@ -16,8 +16,12 @@ def analyze_node(state: dict, deps: Deps) -> dict:
     persona = deps.persona.load()
     prefs = deps.reports.preferences(state.get("user_id") or "")
     frames = _frames(state)
-    narrative, skip = _narrative(state, deps, persona, prefs, frames)
-    masked = deps.masker.mask(narrative, extra_names=collect_pii_values(frames)).text
+    narrative, skip, detail = _narrative(state, deps, persona, prefs, frames)
+    masked = deps.masker.mask(
+        narrative,
+        extra_names=collect_pii_values(frames),
+        protected=collect_display_values(frames) | set(deps.known_brands or []),
+    ).text
     title = _title(masked, state.get("user_text") or "Analysis")
     update = {
         "response": masked,
@@ -28,6 +32,8 @@ def analyze_node(state: dict, deps: Deps) -> dict:
     }
     if skip:
         update["narrative_skip"] = skip
+    if detail:
+        update["narrative_detail"] = detail
     if state.get("results"):
         update["prior_results"] = list(state["results"])
     if state.get("save_report") or state.get("intent") == "report":
@@ -62,38 +68,40 @@ def _frames(state: dict) -> list:
     return list(state.get("results") or state.get("prior_results") or [])
 
 
-def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list | None = None) -> tuple[str, str | None]:
+def _narrative(
+    state: dict, deps: Deps, persona: dict, prefs: dict, frames: list | None = None
+) -> tuple[str, str | None, str | None]:
     frames = list(frames if frames is not None else _frames(state))
     trios = state.get("golden_trios") or []
     is_report = state.get("intent") == "report" or state.get("save_report")
     if is_report:
-        text, skip = _report_narrative(state, deps, persona, prefs, frames, trios)
-        return _with_citation(text, trios), skip
+        text, skip, detail = _report_narrative(state, deps, persona, prefs, frames, trios)
+        return _with_citation(text, trios), skip, detail
     if state.get("golden_template"):
-        text, skip = _golden_narrative(state, deps, persona, prefs, frames, trios)
-        return _with_citation(text, trios), skip
+        text, skip, detail = _golden_narrative(state, deps, persona, prefs, frames, trios)
+        return _with_citation(text, trios), skip, detail
     if deps.models.available() and frames and _llm_allowed(deps):
         user = _analyze_prompt(state, persona, prefs, frames, trios)
         try:
             text = deps.models.generate(tier="pro", system=ANALYZE_SYSTEM, user=user)
             if text and text.strip():
-                return _with_citation(text.strip(), trios), None
+                return _with_citation(text.strip(), trios), None, None
         except Exception:
             pass
-    return _with_citation(_fallback(state, frames), trios), None
+    return _with_citation(_fallback(state, frames), trios), None, None
 
 
-def _golden_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, str | None]:
+def _golden_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, str | None, str | None]:
     """One analysis call. A failure becomes a short summary of the rows."""
     if not frames:
-        return _golden_fallback(state, frames, None), None
+        return _golden_fallback(state, frames, None), None, None
     if not deps.models.available() or not _llm_allowed(deps):
         hint = (
             "Narrative skipped: Gemini is not configured"
             if not deps.models.available()
             else "Narrative skipped: no time left in this turn"
         )
-        return _golden_fallback(state, frames, hint), hint
+        return _golden_fallback(state, frames, hint), hint, None
     user = _analyze_prompt(state, persona, prefs, frames, trios)
     try:
         text = deps.models.generate(
@@ -105,50 +113,81 @@ def _golden_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, 
         )
     except Exception as exc:
         hint = _skip_hint(exc)
-        return _golden_fallback(state, frames, hint), hint
-    if not text or not text.strip():
+        return _golden_fallback(state, frames, hint), hint, _raw_reason(exc)
+    if text is None or text == "":
         hint = "Narrative skipped: the model returned no usable narrative"
-        return _golden_fallback(state, frames, hint), hint
-    return text.strip(), None
+        return _golden_fallback(state, frames, hint), hint, "empty content"
+    if not str(text).strip():
+        hint = "Narrative skipped: the model returned no usable narrative"
+        return _golden_fallback(state, frames, hint), hint, "whitespace only"
+    return str(text).strip(), None, None
 
 
 def _golden_fallback(state: dict, frames: list, hint: str | None) -> str:
     label = state.get("period_label") or "the requested period"
     lines = [f"Results for {label}."]
     if hint:
-        lines.append(hint + ".")
+        lines.append(hint if hint.endswith(".") else hint + ".")
     for frame in frames or []:
         rows = frame.get("rows") or []
         if not rows:
             lines.append("No rows matched these filters.")
             continue
         for row in rows[:5]:
-            if not isinstance(row, dict):
-                continue
-            bits = []
-            for key, value in row.items():
-                bits.append(f"{key} {_format_fact(key, value)}")
-            if bits:
-                lines.append("- " + ", ".join(bits))
+            if isinstance(row, dict):
+                lines.append(_bullet(row))
+    lines.append("")
     lines.append("Revenue excludes Cancelled and Returned. Customers are shown only as customer_key.")
     return "\n".join(lines)
 
 
-def _format_fact(key: str, value) -> str:
-    if value is None:
-        return "n/a"
-    name = str(key).lower()
+def _bullet(row: dict) -> str:
+    """'Wool Suit (Suits): $519.98, 2 orders' with no column-key prefix."""
+    title = _row_text(row, "name", "product", "product_name", "title")
+    category = _row_text(row, "category")
+    brand = _row_text(row, "brand")
+    head = title or brand or category or _row_text(row, "customer_key", "month") or "Row"
+    if category and category != head:
+        head = f"{head} ({category})"
+    elif brand and brand != head and brand not in head:
+        head = f"{head} ({brand})"
+    metrics = []
+    for key, value in row.items():
+        if str(key).lower() in {"name", "product", "product_name", "title", "category", "brand", "department"}:
+            continue
+        phrase = _metric_phrase(str(key), value)
+        if phrase:
+            metrics.append(phrase)
+    if metrics:
+        return f"{head}: {', '.join(metrics)}"
+    return head
+
+
+def _row_text(row: dict, *keys: str) -> str | None:
+    wanted = {key.lower() for key in keys}
+    for key, value in row.items():
+        if str(key).lower() in wanted and value not in (None, ""):
+            return str(value).strip()
+    return None
+
+
+def _metric_phrase(key: str, value) -> str | None:
+    if value is None or value == "":
+        return None
+    name = key.lower()
     if name == "return_rate" and isinstance(value, (int, float)) and not isinstance(value, bool):
         return f"{float(value) * 100:.1f}%"
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if any(token in name for token in ("revenue", "spend", "margin", "aov", "price", "cost")):
             return f"${float(value):,.2f}"
+        if name in {"orders", "items", "customers"} and float(value).is_integer():
+            return f"{int(value):,} {name}"
         if float(value).is_integer():
             return f"{int(value):,}"
-    return str(value)
+    return f"{key} {value}"
 
 
-def _report_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, str | None]:
+def _report_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, str | None, str | None]:
     """One model call, plus one 429 retry if it still fits the turn budget."""
     period = parse_period(
         state.get("user_text") or "",
@@ -157,13 +196,13 @@ def _report_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, 
     )
     note = state.get("period_note") or period.note
     if not frames:
-        return _fallback_report(period, frames, note, None), None
+        return _fallback_report(period, frames, note, None), None, None
     if not deps.models.available():
         hint = "Narrative skipped: Gemini is not configured"
-        return _fallback_report(period, frames, note, hint), hint
+        return _fallback_report(period, frames, note, hint), hint, None
     if not _llm_allowed(deps):
         hint = "Narrative skipped: no time left in this turn"
-        return _fallback_report(period, frames, note, hint), hint
+        return _fallback_report(period, frames, note, hint), hint, None
     user = _analyze_prompt(state, persona, prefs, frames, trios)
     user += (
         f"\n\nThis is a saved quarterly report for {period.label}. "
@@ -181,17 +220,20 @@ def _report_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, 
                 text = _one_narrative_call(deps, user)
             except Exception as second:
                 hint = _skip_hint(second)
-                return _fallback_report(period, frames, note, hint), hint
+                return _fallback_report(period, frames, note, hint), hint, _raw_reason(second)
         else:
             hint = _skip_hint(exc)
-            return _fallback_report(period, frames, note, hint), hint
-    if not text or not text.strip():
+            return _fallback_report(period, frames, note, hint), hint, _raw_reason(exc)
+    if text is None or text == "":
         hint = "Narrative skipped: the model returned no usable narrative"
-        return _fallback_report(period, frames, note, hint), hint
-    body = text.strip()
+        return _fallback_report(period, frames, note, hint), hint, "empty content"
+    if not str(text).strip():
+        hint = "Narrative skipped: the model returned no usable narrative"
+        return _fallback_report(period, frames, note, hint), hint, "whitespace only"
+    body = str(text).strip()
     if note not in body:
         body += "\n\n" + note
-    return body, None
+    return body, None, None
 
 
 def _one_narrative_call(deps: Deps, user: str) -> str:
@@ -240,9 +282,20 @@ def _skip_hint(exc: Exception) -> str:
     text = str(exc).lower()
     if "404" in text or "not found" in text or "no longer available" in text:
         return "Narrative skipped: model not found (404)"
+    if "parse failure" in text:
+        return "Narrative skipped: the model returned no usable narrative"
     if not str(exc).strip():
         return "Narrative skipped: the model returned no usable narrative"
     return "Narrative skipped: the model returned no usable narrative"
+
+
+def _raw_reason(exc: Exception) -> str:
+    text = " ".join(str(exc).split())
+    if not text:
+        text = type(exc).__name__
+    if "parse failure" in text.lower():
+        return text[:300]
+    return f"{type(exc).__name__}: {text}"[:300]
 
 
 def _llm_allowed(deps: Deps) -> bool:

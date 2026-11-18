@@ -116,6 +116,73 @@ def test_fast_path_skips_sql_generation_and_records_the_template(settings):
     assert "sql: golden template gb-0002" in log or '"golden_template": "gb-0002"' in log
 
 
+def test_fallback_bullet_drops_the_name_prefix():
+    from agent.nodes.analyze import _golden_fallback
+
+    text = _golden_fallback(
+        {"period_label": "Q4 2024"},
+        [
+            {
+                "rows": [
+                    {
+                        "name": "Tommy Hilfiger Men's Houndstooth Trim Fit Suit",
+                        "category": "Suits & Sport Coats",
+                        "revenue": 519.98,
+                        "orders": 2,
+                    }
+                ]
+            }
+        ],
+        None,
+    )
+    assert "Tommy Hilfiger Men's Houndstooth Trim Fit Suit (Suits & Sport Coats): $519.98, 2 orders" in text
+    assert "name Tommy" not in text
+    assert "\n\nRevenue excludes Cancelled and Returned." in text
+
+
+def test_empty_narrative_logs_the_raw_reason(settings):
+    def complete(system, user, tier):
+        if "PURPOSE: analyze" in system:
+            return "   "
+        return "SELECT 1"
+
+    runtime = make_runtime(
+        settings,
+        bq=FakeBQ(rows=[{"name": "Wool Suit", "category": "Suits", "revenue": 10, "orders": 1}]),
+        complete=complete,
+    )
+    runtime.deps.data_through = AS_OF
+    runtime.deps.data_through_source = "orders"
+    reply = handle_message(runtime, "What were our top 5 products by revenue last quarter?")
+    assert "Narrative skipped: the model returned no usable narrative" in reply
+    rows = [json.loads(line) for line in Path(settings.log_path).read_text(encoding="utf-8").splitlines()]
+    analyze = [row for row in rows if row.get("span") == "analyze"]
+    assert analyze
+    assert analyze[-1]["details"]["narrative_detail"] == "whitespace only"
+
+
+def test_parse_failure_is_logged_on_the_analyze_span(settings):
+    def complete(system, user, tier):
+        if "PURPOSE: analyze" in system:
+            raise RuntimeError("parse failure: model content had no text parts")
+        return "SELECT 1"
+
+    runtime = make_runtime(
+        settings,
+        bq=FakeBQ(rows=[{"name": "Wool Suit", "revenue": 10, "orders": 1}]),
+        complete=complete,
+    )
+    runtime.deps.data_through = AS_OF
+    runtime.deps.data_through_source = "orders"
+    handle_message(runtime, "What were our top 5 products by revenue last quarter?")
+    rows = [json.loads(line) for line in Path(settings.log_path).read_text(encoding="utf-8").splitlines()]
+    analyze = [row for row in rows if row.get("span") == "analyze"]
+    assert analyze
+    detail = analyze[-1]["details"]["narrative_detail"]
+    assert "parse failure" in detail
+    assert "no text parts" in detail
+
+
 def test_analyze_failure_uses_a_row_summary(settings):
     def complete(system, user, tier):
         raise TimeoutError("The read timed out")

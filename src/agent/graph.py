@@ -42,6 +42,7 @@ _DETAIL_KEYS = (
     "stop_retry",
     "prompt_chars",
     "narrative_skip",
+    "narrative_detail",
     "error_kind",
     "golden_template",
 )

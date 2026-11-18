@@ -1,0 +1,14 @@
+# Demo entitlements. Assumption A1: a user may analyse products of these brands only.
+# Brands below exist in bigquery-public-data.thelook_ecommerce.products.
+users:
+  alice:
+    display_name: Alice
+    role: executive
+    brands:
+      - Calvin Klein
+      - Allegra K
+  bob:
+    display_name: Bob
+    role: executive
+    brands:
+      - Tommy Hilfiger

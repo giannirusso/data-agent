@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opsfleet-retail-agent"
+version = "0.1.0"
+description = "Conversational retail analytics agent over thelook_ecommerce"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Djanibek Khudaybergenov" }]
+dependencies = [
+  "langgraph>=1.0",
+  "langgraph-checkpoint-sqlite>=2.0",
+  "langchain-core>=0.3",
+  "langchain-google-genai>=2.1",
+  "google-cloud-bigquery>=3.25",
+  "sqlglot>=25",
+  "pandas>=2.2",
+  "pyarrow>=14",
+  "db-dtypes>=1.2",
+  "typer>=0.12",
+  "rich>=13",
+  "tenacity>=8",
+  "pydantic>=2",
+  "pydantic-settings>=2",
+  "PyYAML>=6",
+  "rank-bm25>=0.2.2",
+  "langfuse>=2",
+  "python-dotenv>=1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+retail-agent = "agent.cli:app"
+
+[tool.setuptools]
+packages = [
+  "agent",
+  "agent.nodes",
+  "agent.safety",
+  "agent.data",
+  "agent.llm",
+  "agent.golden",
+  "agent.store",
+  "agent.obs",
+  "config",
+]
+
+[tool.setuptools.package-dir]
+agent = "src/agent"
+config = "config"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+addopts = "-q"

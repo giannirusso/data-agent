@@ -42,6 +42,8 @@ _DETAIL_KEYS = (
     "stop_retry",
     "prompt_chars",
     "narrative_skip",
+    "error_kind",
+    "golden_template",
 )
 
 
@@ -204,8 +206,13 @@ def _traced(name: str, fn, deps: Deps):
         except GraphInterrupt:
             status = "waiting"
             raise
-        except Exception:
+        except Exception as exc:
             status = "error"
+            result = {
+                "last_error": str(exc),
+                "error_kind": _exception_kind(exc),
+                "attempts": (state or {}).get("attempts"),
+            }
             raise
         finally:
             deps.logger.span(
@@ -228,6 +235,8 @@ def _span_status(name: str, result: dict | None) -> str:
         return "blocked"
     if name == "confirm_delete":
         return str(result.get("status") or "ok")
+    if name == "generate_sql" and (result.get("fatal") or result.get("error_kind") or result.get("last_error")):
+        return "error"
     if result.get("last_error") and name in {"validate_sql", "dry_run", "execute", "check_result", "generate_sql"}:
         return "error"
     if result.get("status") == "give_up":
@@ -252,3 +261,12 @@ def _details(name: str, result: dict | None) -> dict:
     if name == "execute" and result.get("pending_frame"):
         details["row_count"] = result["pending_frame"].get("row_count")
     return details
+
+
+def _exception_kind(exc: BaseException) -> str:
+    text = str(exc).lower()
+    if any(token in text for token in ("timeout", "timed out", "deadline exceeded")):
+        return "timeout"
+    if "429" in text or "rate limit" in text or "resource exhausted" in text:
+        return "429"
+    return "other"

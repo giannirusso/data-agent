@@ -166,6 +166,13 @@ def _thinking_rejected(exc: BaseException) -> bool:
     return False
 
 
+def timeout_message(seconds: int) -> str:
+    return (
+        f"Gemini timed out after {int(seconds)}s (free tier is slow). "
+        "Try /retry or raise GEMINI_TIMEOUT_SECONDS"
+    )
+
+
 def _is_timeout(exc: Exception) -> bool:
     current: BaseException | None = exc
     seen: list[BaseException] = []
@@ -242,10 +249,10 @@ class ModelProvider:
     ) -> str:
         primary = tier if tier in {"pro", "flash"} else "flash"
         if self.max_llm_calls and self.llm_calls >= self.max_llm_calls:
-            raise LLMTimeoutError("The model call cap for this turn was reached. Try `/retry`.")
+            raise LLMTimeoutError(self._timeout_text())
         if self.turn_started and self.turn_budget_s:
             if (time.perf_counter() - self.turn_started) > self.turn_budget_s:
-                raise LLMTimeoutError("The turn timed out before the model answered. Try `/retry`.")
+                raise LLMTimeoutError(self._timeout_text())
         self.llm_calls += 1
         if primary == "pro" and not self.breaker.allow(self.clock()):
             self.fallback_used = True
@@ -294,7 +301,7 @@ class ModelProvider:
             )
         except Exception as first:
             if _is_timeout(first):
-                raise LLMTimeoutError("The model timed out. Try `/retry`.") from first
+                raise LLMTimeoutError(self._timeout_text()) from first
             if primary == "flash" or self._same_model():
                 if _is_rate_limit(first):
                     raise LLMRateLimitError(retry_after=_retry_after_seconds(first)) from first
@@ -315,7 +322,7 @@ class ModelProvider:
                 raise
             except Exception as second:
                 if _is_timeout(second):
-                    raise LLMTimeoutError("The model timed out. Try `/retry`.") from second
+                    raise LLMTimeoutError(self._timeout_text()) from second
                 if _is_rate_limit(second):
                     raise LLMRateLimitError(retry_after=_retry_after_seconds(second)) from second
                 raise LLMFatalError("The model is busy right now.") from second
@@ -327,6 +334,9 @@ class ModelProvider:
         if tier == "pro":
             return self.settings.gemini_model_pro
         return self.settings.gemini_model_flash
+
+    def _timeout_text(self) -> str:
+        return timeout_message(self.settings.gemini_timeout_seconds)
 
     def _call(
         self,
@@ -369,7 +379,7 @@ class ModelProvider:
                 if is_config_error(exc):
                     raise LLMConfigError(config_message(self._model_id(tier), exc), model_id=self._model_id(tier)) from exc
                 if _is_timeout(exc):
-                    raise LLMTimeoutError("The model timed out. Try `/retry`.") from exc
+                    raise LLMTimeoutError(self._timeout_text()) from exc
                 if is_transient(exc):
                     raise LLMTransientError(str(exc), getattr(exc, "status_code", None)) from exc
                 raise
@@ -389,14 +399,17 @@ class ModelProvider:
         model = self._gemini(tier)
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        kwargs: dict = {"timeout": self.settings.gemini_timeout_seconds}
+        timeout = max(1, int(self.settings.gemini_timeout_seconds))
+        kwargs: dict = {"timeout": timeout}
         if thinking_level:
             kwargs["thinking_level"] = thinking_level
         if max_output_tokens:
             kwargs["max_output_tokens"] = max_output_tokens
-        message = model.invoke(
+        message = self._invoke_with_deadline(
+            model,
             [SystemMessage(content=system), HumanMessage(content=user)],
-            **kwargs,
+            kwargs,
+            timeout,
         )
         content = message.content
         if isinstance(content, str):
@@ -410,6 +423,20 @@ class ModelProvider:
                     parts.append(str(item.get("text") or ""))
             return "".join(parts)
         return str(content)
+
+    def _invoke_with_deadline(self, model, messages, kwargs: dict, timeout: int):
+        """Stop the call at GEMINI_TIMEOUT_SECONDS even if the client timeout is ignored."""
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FuturesTimeout
+
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(model.invoke, messages, **kwargs)
+            return future.result(timeout=timeout)
+        except FuturesTimeout as exc:
+            raise LLMTimeoutError(self._timeout_text()) from exc
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _scripted(self, tier: str, system: str, user: str, thinking_level: str | None) -> str:
         import inspect

@@ -500,8 +500,7 @@ audit_log(id, actor_user_id, action, report_ids JSON, request_text, trace_id, ts
 - *CrewAI / AutoGen (multi-agent):* too much autonomy for a safety-critical path; harder to guarantee deterministic validation order.
 - *Plain function-calling loop:* simplest, but retries, HITL pause/resume, and persistence would have to be rebuilt by hand.
 
-**My experience:** I have used LangGraph in production for a **Text-to-SQL agent** (schema-aware generation, validation and a 2-retry self-correction loop, evaluated on a hold-out set) and a **multi-step research agent**, plus RAG systems with hybrid retrieval and LangFuse-based tracing/evaluation. This design reuses those patterns directly.
-<!-- TODO(Djanibek): adjust this paragraph to your exact experience and numbers from the CV. -->
+**Why LangGraph.** I chose LangGraph because the task is a stateful, branching workflow (guard → retrieve → SQL → validate → dry-run → execute → self-correct → analyze) with a human-in-the-loop step for deletions; LangGraph gives explicit nodes, conditional retry edges, `interrupt()` for confirmations and a checkpointer for conversation state. I have used LangGraph in production-style projects: an Enterprise RAG assistant over Confluence, a Text-to-SQL system, a multi-step Research Agent and an Intent Classifier, so the patterns here (routing, tool-calling, bounded retries, tracing) are ones I have applied before.
 
 ---
 

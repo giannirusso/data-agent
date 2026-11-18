@@ -37,7 +37,7 @@ Run the agent with `python -m agent.cli --user alice` after the setup in the REA
 | (b) agent flow | implemented | README section 6 and the agent-flow diagram in `architecture.md` |
 | (c) data flow | implemented | README section 7 |
 | (d) error handling and fallbacks | implemented | README section 9 |
-| (e) framework rationale | implemented | README section 10. The experience paragraph is still the `<!-- TODO(Djanibek) -->` placeholder. |
+| (e) framework rationale | implemented | README section 10 and HLD section 11. The LangGraph paragraph covers the graph, `interrupt()`, and prior Text-to-SQL, RAG, research, and intent-classifier work. |
 | Chat agent that saves a report with insights and action items | implemented+tested offline, including when the narrative model times out. Quarter with no year follows `MAX(orders.created_at)` (cached per session; today if BigQuery fails). | `src/agent/reports/templates.py`, `src/agent/reports/period.py`, `src/agent/nodes/plan.py`, `analyze.py`. Tests: `tests/test_report_templates.py`. Prompt: `create a report for Q1 including insights and action items for Q2`, then `/reports`. The note should name the latest complete Q1 on or before the latest order date (Q1 2026 if orders run through Nov 2026). |
 | CLI | implemented+tested | `src/agent/cli.py`, `python -m agent` and `python -m agent.cli` | `tests/test_cli.py` | `/help`, `/whoami`, `/exit` |
 | Setup on another machine, including Windows | implemented | README section 12. PowerShell: `Set-ExecutionPolicy -Scope Process Bypass` then `.venv\Scripts\activate` | not a unit test | Follow section 12 on a clean machine. |

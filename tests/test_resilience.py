@@ -17,6 +17,8 @@ VALID = (
     "SELECT SUM(sale_price) AS revenue FROM order_items "
     "WHERE status NOT IN ('Cancelled','Returned')"
 )
+# Not a golden template, so these tests still exercise model SQL.
+NOVEL = "Why did margin fall in the Northeast last year?"
 
 
 def test_assignment_phrases_route_without_a_model():
@@ -98,7 +100,7 @@ def test_bad_sql_is_fixed_on_retry(settings):
         ]
     )
     runtime = make_runtime(settings, bq=bq, complete=lambda system, user, tier: next(replies))
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert bq.execute_count == 1
     assert len(bq.dry_runs) == 1
     assert "100" in reply
@@ -122,7 +124,7 @@ def test_three_distinct_failures_give_a_graceful_message(settings):
         return "unused"
 
     runtime = make_runtime(settings, bq=bq, complete=complete)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert bq.executed == []
     assert "couldn't answer" in reply.lower() or "several attempts" in reply.lower()
     assert "trace:" in reply
@@ -139,7 +141,7 @@ def test_identical_sql_stops_early(settings):
         return "unused"
 
     runtime = make_runtime(settings, bq=bq, complete=complete)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert calls["n"] == 2
     assert bq.executed == []
     assert "trace:" in reply
@@ -163,7 +165,7 @@ def test_rate_limit_falls_back_to_flash(settings):
 
     bq = FakeBQ()
     runtime = make_runtime(settings, bq=bq, complete=complete)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert runtime.deps.models.fallback_used
     assert "flash" in runtime.deps.models.calls
     assert bq.execute_count == 1
@@ -184,7 +186,7 @@ def test_empty_result_is_reported_honestly(settings):
         return "No orders matched these filters."
 
     runtime = make_runtime(settings, bq=bq, complete=complete)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert bq.execute_count == 2
     assert "no orders" in reply.lower() or "no rows" in reply.lower()
 
@@ -206,7 +208,7 @@ def test_negative_revenue_is_retried(settings):
         return "Revenue was 12 after a corrected query."
 
     runtime = make_runtime(settings, bq=bq, complete=complete)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert bq.execute_count == 2
     assert "12" in reply
 
@@ -314,7 +316,7 @@ def test_golden_bucket_retrieves_the_state_spend_trio():
 
 def test_missing_model_does_not_crash(settings):
     runtime = make_runtime(settings, bq=FakeBQ(), complete=None)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert "GOOGLE_API_KEY" in reply
     assert "trace:" in reply
 
@@ -362,7 +364,7 @@ def test_invalid_argument_is_a_config_error_not_busy(settings):
         raise RuntimeError(THINKING_400)
 
     runtime = make_runtime(settings, bq=FakeBQ(), complete=complete)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert "Model gemini-3.8-flash rejected the request:" in reply
     assert "thinking level is not supported" in reply.lower()
     assert "busy" not in reply.lower()
@@ -389,7 +391,7 @@ def test_retired_model_is_a_config_error_not_busy(settings):
         raise RuntimeError("404 NOT_FOUND: models/gemini-2.5-pro is no longer available to new users")
 
     runtime = make_runtime(settings, bq=FakeBQ(), complete=complete)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
+    reply = handle_message(runtime, NOVEL)
     assert calls["n"] == 1
     assert "rejected the request" in reply.lower()
     assert "no longer available" in reply.lower()

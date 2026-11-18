@@ -5,7 +5,13 @@ from __future__ import annotations
 import hashlib
 
 from agent.deps import Deps, status
-from agent.llm.models import LLMConfigError, LLMFatalError, LLMRateLimitError, LLMTimeoutError
+from agent.llm.models import (
+    LLMConfigError,
+    LLMFatalError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    timeout_message,
+)
 from agent.llm.parsing import extract_sql
 from agent.llm.prompts import SQL_SYSTEM
 from agent.safety.safe_schema import sql_prompt_schema
@@ -64,38 +70,21 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
             user=user,
             max_output_tokens=2048,
         )
-    except LLMRateLimitError as exc:
-        return {
-            "fatal": "model_outage",
-            "stop_retry": True,
-            "last_error": "The model is busy right now.",
-            "attempts": attempts,
-            "retry_execute": False,
-        }
-    except LLMTimeoutError as exc:
-        return {
-            "fatal": "model_timeout",
-            "stop_retry": True,
-            "last_error": str(exc),
-            "attempts": attempts,
-            "retry_execute": False,
-        }
+    except LLMRateLimitError:
+        return _model_failure(attempts, "429", "model_outage", "429 rate limit. The model is busy right now.")
+    except LLMTimeoutError:
+        return _model_failure(
+            attempts,
+            "timeout",
+            "model_timeout",
+            timeout_message(deps.settings.gemini_timeout_seconds),
+        )
     except LLMConfigError as exc:
-        return {
-            "fatal": "model_config",
-            "stop_retry": True,
-            "last_error": str(exc),
-            "attempts": attempts,
-            "retry_execute": False,
-        }
+        return _model_failure(attempts, "other", "model_config", str(exc))
     except LLMFatalError as exc:
-        return {
-            "fatal": "model_outage",
-            "stop_retry": True,
-            "last_error": str(exc),
-            "attempts": attempts,
-            "retry_execute": False,
-        }
+        text = str(exc)
+        kind = "429" if "429" in text or "rate limit" in text.lower() else "other"
+        return _model_failure(attempts, kind, "model_outage", text or "The model is busy right now.")
     sql = extract_sql(raw)
     fingerprint = hashlib.sha256(sql.strip().encode()).hexdigest() if sql else "empty"
     repeated = bool(state.get("last_error")) and fingerprint == state.get("sql_fingerprint")
@@ -113,15 +102,29 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
     }
 
 
+def _model_failure(attempts: int, kind: str, fatal: str, message: str) -> dict:
+    return {
+        "fatal": fatal,
+        "stop_retry": True,
+        "last_error": message,
+        "error_kind": kind,
+        "attempts": attempts,
+        "retry_execute": False,
+    }
+
+
 def _template_step(state: dict, sub: dict, attempts: int) -> dict:
     """Use the pre-written statement. A second pass with the same error gives up."""
     sql = str(sub.get("sql") or "").strip()
+    template_id = sub.get("golden_template") or state.get("golden_template")
     if state.get("last_error"):
         return {
             "template_sql": True,
+            "golden_template": template_id,
             "stop_retry": True,
             "fatal": None,
             "last_error": state.get("last_error"),
+            "error_kind": "other",
             "attempts": attempts,
             "sql": sql,
         }
@@ -129,6 +132,7 @@ def _template_step(state: dict, sub: dict, attempts: int) -> dict:
     return {
         "sql": sql,
         "template_sql": True,
+        "golden_template": template_id,
         "step_params": dict(sub.get("params") or {}),
         "attempts": attempts,
         "stop_retry": False,

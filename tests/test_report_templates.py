@@ -61,10 +61,17 @@ def test_sql_timeout_is_not_called_busy(settings):
         raise TimeoutError("The read timed out")
 
     runtime = make_runtime(settings, bq=FakeBQ(), complete=complete)
-    reply = handle_message(runtime, "Monthly revenue in 2023")
-    assert "timed out" in reply.lower()
-    assert "/retry" in reply
+    reply = handle_message(runtime, "Why did margin fall in the Northeast last year?")
+    assert "Gemini timed out after 150s (free tier is slow)." in reply
+    assert "Try /retry or raise GEMINI_TIMEOUT_SECONDS" in reply
     assert "busy" not in reply.lower()
+    rows = [json.loads(line) for line in Path(settings.log_path).read_text(encoding="utf-8").splitlines()]
+    sql_rows = [row for row in rows if row.get("span") == "generate_sql"]
+    assert sql_rows
+    assert sql_rows[-1]["status"] == "error"
+    assert sql_rows[-1]["details"]["error_kind"] == "timeout"
+    assert sql_rows[-1]["details"]["attempts"] >= 1
+    assert "timed out" in sql_rows[-1]["details"]["last_error"].lower()
 
 
 def test_timeout_still_saves_a_template_report(settings):

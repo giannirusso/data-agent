@@ -188,13 +188,17 @@ def _show_trace(runtime: Runtime, trace_id: str) -> str:
         bits = [f"{row.get('span')} ({row.get('status')}, {row.get('duration_ms')} ms)"]
         if details.get("last_error"):
             bits.append(str(details["last_error"])[:180])
+        if details.get("golden_template"):
+            bits.append(f"sql: golden template {details['golden_template']}")
+        if details.get("error_kind"):
+            bits.append(str(details["error_kind"]))
         if details.get("golden_ids"):
             bits.append("trios " + ", ".join(details["golden_ids"]))
         if details.get("row_count") is not None:
             bits.append(f"rows {details['row_count']}")
         if details.get("last_bytes"):
             bits.append(f"bytes {details['last_bytes']}")
-        if details.get("rewritten_sql") or details.get("sql"):
+        if not details.get("golden_template") and (details.get("rewritten_sql") or details.get("sql")):
             bits.append("sql " + str(details.get("rewritten_sql") or details.get("sql"))[:240])
         if details.get("attempts"):
             bits.append(f"attempt {details['attempts']}")

@@ -36,9 +36,9 @@ class Settings(BaseSettings):
     # inside a few seconds per call. Point GEMINI_MODEL_PRO at a Pro id to trade latency.
     gemini_model_pro: str = "gemini-3.8-flash"
     gemini_model_flash: str = "gemini-3.8-flash"
-    # Free-tier gemini-3.8-flash often needs 60–90s for the first SQL call.
-    # A 20s cap aborted a call that then succeeded at 76s.
-    gemini_timeout_seconds: int = 90
+    # Free-tier gemini-3.8-flash SQL calls often take 60–160s.
+    # 150s covers that queue. Raise GEMINI_TIMEOUT_SECONDS if a call still dies.
+    gemini_timeout_seconds: int = 150
     # gemini-3.8-flash rejects "minimal". "low" is the fastest level it accepts.
     gemini_thinking_level: str = "low"
     langfuse_public_key: str = ""
@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     bq_timeout_seconds: int = 120
     max_sql_attempts: int = 3
     max_llm_calls: int = 3
-    turn_budget_seconds: int = 150
+    # Long enough for one 150s SQL call plus a short analysis call.
+    turn_budget_seconds: int = 240
     max_rows: int = 1000
     max_subquestions: int = 6
     delete_ttl_seconds: int = 600

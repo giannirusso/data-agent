@@ -65,9 +65,12 @@ def _frames(state: dict) -> list:
 def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list | None = None) -> tuple[str, str | None]:
     frames = list(frames if frames is not None else _frames(state))
     trios = state.get("golden_trios") or []
-    is_report = state.get("intent") == "report" or state.get("save_report") or state.get("template_sql")
+    is_report = state.get("intent") == "report" or state.get("save_report")
     if is_report:
         text, skip = _report_narrative(state, deps, persona, prefs, frames, trios)
+        return _with_citation(text, trios), skip
+    if state.get("golden_template"):
+        text, skip = _golden_narrative(state, deps, persona, prefs, frames, trios)
         return _with_citation(text, trios), skip
     if deps.models.available() and frames and _llm_allowed(deps):
         user = _analyze_prompt(state, persona, prefs, frames, trios)
@@ -78,6 +81,71 @@ def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list
         except Exception:
             pass
     return _with_citation(_fallback(state, frames), trios), None
+
+
+def _golden_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, str | None]:
+    """One analysis call. A failure becomes a short summary of the rows."""
+    if not frames:
+        return _golden_fallback(state, frames, None), None
+    if not deps.models.available() or not _llm_allowed(deps):
+        hint = (
+            "Narrative skipped: Gemini is not configured"
+            if not deps.models.available()
+            else "Narrative skipped: no time left in this turn"
+        )
+        return _golden_fallback(state, frames, hint), hint
+    user = _analyze_prompt(state, persona, prefs, frames, trios)
+    try:
+        text = deps.models.generate(
+            tier="pro",
+            system=ANALYZE_SYSTEM,
+            user=user,
+            max_output_tokens=2048,
+            max_attempts=1,
+        )
+    except Exception as exc:
+        hint = _skip_hint(exc)
+        return _golden_fallback(state, frames, hint), hint
+    if not text or not text.strip():
+        hint = "Narrative skipped: the model returned no usable narrative"
+        return _golden_fallback(state, frames, hint), hint
+    return text.strip(), None
+
+
+def _golden_fallback(state: dict, frames: list, hint: str | None) -> str:
+    label = state.get("period_label") or "the requested period"
+    lines = [f"Results for {label}."]
+    if hint:
+        lines.append(hint + ".")
+    for frame in frames or []:
+        rows = frame.get("rows") or []
+        if not rows:
+            lines.append("No rows matched these filters.")
+            continue
+        for row in rows[:5]:
+            if not isinstance(row, dict):
+                continue
+            bits = []
+            for key, value in row.items():
+                bits.append(f"{key} {_format_fact(key, value)}")
+            if bits:
+                lines.append("- " + ", ".join(bits))
+    lines.append("Revenue excludes Cancelled and Returned. Customers are shown only as customer_key.")
+    return "\n".join(lines)
+
+
+def _format_fact(key: str, value) -> str:
+    if value is None:
+        return "n/a"
+    name = str(key).lower()
+    if name == "return_rate" and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{float(value) * 100:.1f}%"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if any(token in name for token in ("revenue", "spend", "margin", "aov", "price", "cost")):
+            return f"${float(value):,.2f}"
+        if float(value).is_integer():
+            return f"{int(value):,}"
+    return str(value)
 
 
 def _report_narrative(state, deps, persona, prefs, frames, trios) -> tuple[str, str | None]:

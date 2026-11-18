@@ -30,6 +30,9 @@ def mask_node(state: dict, deps: Deps) -> dict:
             "golden_ids": [trio.get("id") for trio in state.get("golden_trios") or []],
             "fatal": state.get("fatal"),
             "narrative_skip": state.get("narrative_skip"),
+            "error_kind": state.get("error_kind"),
+            "golden_template": state.get("golden_template"),
+            "last_error": state.get("last_error"),
         },
     )
     return {

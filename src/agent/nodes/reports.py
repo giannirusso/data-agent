@@ -78,10 +78,9 @@ def give_up_node(state: dict, deps: Deps) -> dict:
             "The configured model is not available. Set GEMINI_MODEL_PRO and GEMINI_MODEL_FLASH in .env."
         )
     elif fatal == "model_timeout":
-        message = (
-            "The model timed out before it finished. "
-            "Try `/retry`, or ask for one metric and a shorter period."
-        )
+        from agent.llm.models import timeout_message
+
+        message = state.get("last_error") or timeout_message(deps.settings.gemini_timeout_seconds)
     elif fatal == "model_outage":
         message = "The model is busy right now. Try again in a minute with `/retry`."
     elif fatal == "no_scope":

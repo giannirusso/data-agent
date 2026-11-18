@@ -202,7 +202,7 @@ def _traced(name: str, fn, deps: Deps):
             status = _span_status(name, result)
             return result
         except GraphInterrupt:
-            status = "interrupted"
+            status = "waiting"
             raise
         except Exception:
             status = "error"

@@ -283,7 +283,7 @@ The production program in the HLD (execution accuracy, faithfulness, release gat
 
 Every node writes one JSON line to `logs/agent.jsonl`: `trace_id`, `span`, `duration_ms`, `status`, and a details object. Payloads pass through the PII masker first. A `turn` span records intent, query count, bytes, persona version, golden ids, and mask hits.
 
-`/trace <id>` prints the spans, including SQL, attempt number, bytes, and errors. `/stats` summarizes the session. The answer footer always shows the `trace_id` and a per-node timing line (`nodes: generate_sql 3.2s, execute 1.1s, …`). Money columns are rounded to two decimals in that table.
+`/trace <id>` prints the spans, including SQL, attempt number, bytes, and errors. `/stats` shows this session and all-time rates from `logs/agent.jsonl` (guard blocks, self-correction, give-ups, p50/p95, bytes, PII hits). Delete confirmations are not counted as errors. The answer footer always shows the `trace_id` and a per-node timing line (`nodes: generate_sql 3.2s, execute 1.1s, …`). Money columns are rounded to two decimals in that table.
 
 LangFuse is optional. With both keys set, a LangChain callback is added to the graph config. A missing package, a missing key, or an exporter error does not fail the turn.
 

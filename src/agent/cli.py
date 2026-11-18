@@ -14,7 +14,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from agent.numbers import format_cell
-from agent.obs.logging import summarize_session
+from agent.obs.logging import format_stats, summarize_session
 from agent.runtime import Runtime, build_runtime
 from config.settings import load_settings
 
@@ -141,10 +141,9 @@ def _slash(runtime: Runtime, command: str, rest: str) -> str:
     if command == "/trace":
         return _show_trace(runtime, rest)
     if command == "/stats":
-        rows = runtime.deps.logger.session_rows(runtime.session_id)
-        summary = summarize_session(rows)
-        lines = [f"{key}: {value}" for key, value in summary.items()]
-        return "Session metrics\n\n" + "\n".join(f"- {line}" for line in lines)
+        session = summarize_session(runtime.deps.logger.session_rows(runtime.session_id))
+        overall = summarize_session(runtime.deps.logger.all_rows())
+        return format_stats(session, overall)
     if command == "/retry":
         if not runtime.last_question:
             return "There is no previous question to retry."

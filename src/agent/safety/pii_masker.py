@@ -1,9 +1,10 @@
 """Final-text PII scrubber.
 
-Regex covers emails, phone numbers, card numbers, street addresses, and labelled
-person-name patterns. A conservative Capitalized Name pass skips brands, places,
-and business words. Presidio is used when it is installed; otherwise this regex
-layer is the whole masker. The same function is applied to logs.
+Emails, phones, card numbers, and street addresses are removed with regex.
+Person names are removed only when they match a value that was actually present
+(a first_name/last_name cell, or an explicit known-name list) or when the text
+labels them ("customer Jane Doe"). Capitalized product titles and categories
+are left alone. The same function is applied to logs.
 """
 
 from __future__ import annotations
@@ -24,56 +25,30 @@ STREET_RE = re.compile(
 )
 ZIP_RE = re.compile(r"\b(?:zip|postal(?:\s*code)?)\s*[:#]?\s*\d{5}(?:-\d{4})?\b", re.IGNORECASE)
 COORD_RE = re.compile(r"\b-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}\b")
+# Only a name that follows an explicit label. "Sport Coats" and product titles do not.
 LABELED_NAME_RE = re.compile(
-    r"\b(?:customer(?:\s+name)?|contact|name|mr|mrs|ms)\.?\s*(?:is|:)?\s*"
+    r"(?i:\b(?:customer(?:\s+name)?|contact|full\s+name|name|mr|mrs|ms)\.?\s+(?:is\s+|:\s*)?)"
     r"([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20})?)\b"
 )
-NAME_RE = re.compile(r"\b[A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20})+\b")
 
-# Tokens that are not person names in this domain. Compared in lowercase.
-_STOP = frozenset(
+_NOT_A_NAME = frozenset(
     """
-    action items order orders revenue average brand brands total customer customers
-    key keys traffic source search organic email campaign product products category
-    department quarter month week year sales sale report reports insight insights
-    united states new york jersey mexico north south east west carolina dakota
-    virginia rhode island hong kong los angeles costa rica sri lanka saudi arabia
-    czech republic puerto rico south korea united kingdom district columbia
-    big query average order customer key traffic source action item calvin klein
-    allegra tommy hilfiger texas california florida ohio georgia illinois
+    count key keys revenue sales sale total average order orders product products
+    category categories brand brands report reports insight insights data table
+    tables item items customer customers number numbers id ids status state
+    department departments cost price margin profit aov amount
     """.split()
 )
 
-_PROTECTED_BIGRAMS = frozenset(
+_PII_COLUMNS = frozenset(
     {
-        "calvin klein",
-        "allegra k",
-        "tommy hilfiger",
-        "new york",
-        "new jersey",
-        "new mexico",
-        "north carolina",
-        "south carolina",
-        "north dakota",
-        "south dakota",
-        "west virginia",
-        "rhode island",
-        "hong kong",
-        "los angeles",
-        "costa rica",
-        "sri lanka",
-        "saudi arabia",
-        "czech republic",
-        "puerto rico",
-        "south korea",
-        "united kingdom",
-        "united states",
-        "action items",
-        "order frequency",
-        "average order",
-        "customer key",
-        "traffic source",
-        "district columbia",
+        "first_name",
+        "firstname",
+        "last_name",
+        "lastname",
+        "email",
+        "street_address",
+        "streetaddress",
     }
 )
 
@@ -85,13 +60,13 @@ class MaskResult:
 
 
 class PiiMasker:
-    def __init__(self, protected_bigrams: set[str] | None = None) -> None:
-        extra = {b.lower() for b in (protected_bigrams or set())}
-        self.protected = _PROTECTED_BIGRAMS | extra
-        self._presidio = None
-        self._presidio_tried = False
+    def __init__(self, known_names: set[str] | None = None, protected_bigrams: set[str] | None = None) -> None:
+        # protected_bigrams is accepted so older call sites keep working. Names are
+        # no longer guessed from capitalization, so brands do not need a stoplist.
+        del protected_bigrams
+        self.known_names = _clean_names(known_names or set())
 
-    def mask(self, text: str) -> MaskResult:
+    def mask(self, text: str, extra_names: set[str] | None = None) -> MaskResult:
         if not text:
             return MaskResult(text or "", 0)
         hits = 0
@@ -109,90 +84,76 @@ class PiiMasker:
         hits += n
         updated, n = _sub(COORD_RE, updated, "[COORD]")
         hits += n
-
-        def labeled(match: re.Match[str]) -> str:
-            return match.group(0).replace(match.group(1), "[NAME]")
-
-        updated, n = _sub(LABELED_NAME_RE, updated, labeled)
+        updated, n = _sub(LABELED_NAME_RE, updated, _replace_labeled)
         hits += n
-        updated, n = self._mask_names(updated)
-        hits += n
-        updated, n = self._mask_presidio(updated)
+        names = self.known_names | _clean_names(extra_names or set())
+        updated, n = _mask_known_names(updated, names)
         hits += n
         return MaskResult(updated, hits)
 
-    def mask_obj(self, value):
+    def mask_obj(self, value, extra_names: set[str] | None = None):
         if isinstance(value, str):
-            return self.mask(value).text
+            return self.mask(value, extra_names=extra_names).text
         if isinstance(value, dict):
-            return {k: self.mask_obj(v) for k, v in value.items()}
+            return {key: self.mask_obj(item, extra_names=extra_names) for key, item in value.items()}
         if isinstance(value, list):
-            return [self.mask_obj(v) for v in value]
+            return [self.mask_obj(item, extra_names=extra_names) for item in value]
         if isinstance(value, tuple):
-            return [self.mask_obj(v) for v in value]
+            return [self.mask_obj(item, extra_names=extra_names) for item in value]
         return value
 
-    def _mask_names(self, text: str) -> tuple[str, int]:
-        hits = 0
 
-        def repl(match: re.Match[str]) -> str:
-            nonlocal hits
-            words = match.group(0).split()
-            index = 0
-            while index < len(words) and words[index].lower() in _STOP:
-                index += 1
-            tail = words[index:]
-            if len(tail) < 2:
-                return match.group(0)
-            for first, second in zip(tail, tail[1:]):
-                bigram = f"{first} {second}".lower()
-                if bigram in self.protected or second.lower() in _STOP:
-                    return match.group(0)
-            hits += 1
-            prefix = " ".join(words[:index])
-            masked = "[NAME]"
-            return f"{prefix} {masked}".strip()
+def collect_pii_values(frames: list | None) -> set[str]:
+    """Exact strings from PII columns, if a frame ever contains them."""
+    found: set[str] = set()
+    for frame in frames or []:
+        rows = frame.get("rows") if isinstance(frame, dict) else None
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            first = last = None
+            for key, value in row.items():
+                if value is None or value == "":
+                    continue
+                lowered = str(key).lower()
+                text = str(value).strip()
+                if lowered in _PII_COLUMNS and text:
+                    found.add(text)
+                if lowered in {"first_name", "firstname"}:
+                    first = text
+                if lowered in {"last_name", "lastname"}:
+                    last = text
+            if first and last:
+                found.add(f"{first} {last}")
+    return _clean_names(found)
 
-        return NAME_RE.sub(repl, text), hits
 
-    def _mask_presidio(self, text: str) -> tuple[str, int]:
-        engine = self._engine()
-        if engine is None:
-            return text, 0
-        try:
-            results = engine.analyze(
-                text=text,
-                entities=["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "LOCATION"],
-                language="en",
-            )
-        except Exception:
-            return text, 0
-        if not results:
-            return text, 0
-        hits = 0
-        chars = list(text)
-        for result in sorted(results, key=lambda item: item.start, reverse=True):
-            label = {
-                "PERSON": "[NAME]",
-                "EMAIL_ADDRESS": "[EMAIL]",
-                "PHONE_NUMBER": "[PHONE]",
-                "LOCATION": "[ADDRESS]",
-            }.get(result.entity_type, "[REDACTED]")
-            chars[result.start : result.end] = list(label)
-            hits += 1
-        return "".join(chars), hits
+def _clean_names(names: set[str]) -> set[str]:
+    cleaned = set()
+    for name in names:
+        text = str(name).strip()
+        if len(text) < 2:
+            continue
+        if text.lower() in _NOT_A_NAME:
+            continue
+        cleaned.add(text)
+    return cleaned
 
-    def _engine(self):
-        if self._presidio_tried:
-            return self._presidio
-        self._presidio_tried = True
-        try:
-            from presidio_analyzer import AnalyzerEngine
 
-            self._presidio = AnalyzerEngine()
-        except Exception:
-            self._presidio = None
-        return self._presidio
+def _replace_labeled(match: re.Match[str]) -> str:
+    name = match.group(1)
+    if any(part.lower() in _NOT_A_NAME for part in name.split()):
+        return match.group(0)
+    return match.group(0).replace(name, "[NAME]")
+
+
+def _mask_known_names(text: str, names: set[str]) -> tuple[str, int]:
+    hits = 0
+    for name in sorted(names, key=len, reverse=True):
+        pattern = re.compile(rf"(?<!\w){re.escape(name)}(?!\w)", re.IGNORECASE)
+        text, count = _sub(pattern, text, "[NAME]")
+        hits += count
+    return text, hits
 
 
 def _sub(pattern: re.Pattern[str], text: str, repl) -> tuple[str, int]:

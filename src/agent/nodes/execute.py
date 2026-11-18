@@ -9,6 +9,7 @@ import pandas as pd
 from agent.data.bq_client import BigQueryConfigError, BigQueryRunnerError
 from agent.data.cache import QueryCache
 from agent.deps import Deps, status
+from agent.numbers import round_value
 
 
 def _params(state: dict, deps: Deps) -> dict:
@@ -132,10 +133,15 @@ def frame_from_df(df: pd.DataFrame, question: str, sql: str, scanned_bytes: int)
     view = df.head(50)
     try:
         rows = json.loads(view.to_json(orient="records", date_format="iso"))
+        rows = [
+            {key: round_value(str(key), value) for key, value in row.items()}
+            for row in rows
+            if isinstance(row, dict)
+        ]
     except Exception:
         rows = []
         for record in view.to_dict(orient="records"):
-            rows.append({key: _plain(value) for key, value in record.items()})
+            rows.append({key: round_value(str(key), _plain(value)) for key, value in record.items()})
     return {
         "question": question,
         "sql": sql,

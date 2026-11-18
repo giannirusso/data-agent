@@ -91,6 +91,20 @@ ALLOWED_CATALOGS = frozenset({"", "bigquery-public-data"})
 ALLOWED_DATASETS = frozenset({"", "thelook_ecommerce"})
 
 
+def sql_prompt_schema() -> str:
+    """Short schema for the SQL prompt. The user-facing catalog is much longer."""
+    return "\n".join(
+        [
+            "products(id, name, brand, category, department, cost, retail_price, sku, distribution_center_id)",
+            "order_items(id, order_id, user_id, customer_key, product_id, status, sale_price, created_at, shipped_at, delivered_at, returned_at)",
+            "orders(order_id, user_id, customer_key, status, gender, num_of_item, created_at, shipped_at, delivered_at, returned_at)",
+            "users(id, customer_key, age, gender, city, state, country, traffic_source, created_at)",
+            "No first_name, last_name, email, street_address, postal_code, latitude, longitude.",
+            "Round money with ROUND(expr, 2). Revenue excludes status Cancelled and Returned.",
+        ]
+    )
+
+
 def catalog_markdown() -> str:
     """Safe catalog shown for schema questions. No SQL is run."""
     return "\n".join(

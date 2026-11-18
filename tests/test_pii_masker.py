@@ -34,6 +34,20 @@ def test_does_not_mask_brand_or_state_names():
     assert "Texas" in masked
 
 
+def test_product_and_category_text_is_not_a_name():
+    masker = PiiMasker()
+    product = "Calvin Klein Mens 2 Button Solid Black Wool Suit"
+    category = "Suits & Sport Coats"
+    assert masker.mask(product).text == product
+    assert masker.mask(category).text == category
+    sentence = f"{product} is in {category}. Customer Jane Doe bought it."
+    masked = masker.mask(sentence, extra_names={"Jane Doe"})
+    assert product in masked.text
+    assert category in masked.text
+    assert "Jane Doe" not in masked.text
+    assert "[NAME]" in masked.text
+
+
 def test_logs_do_not_contain_raw_pii(settings):
     runtime = make_runtime(settings, bq=FakeBQ(), complete=None)
     runtime.deps.logger.span(

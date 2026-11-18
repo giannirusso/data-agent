@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from typing import Any
 
 import typer
 from langchain_core.messages import HumanMessage
@@ -14,6 +13,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
+from agent.numbers import format_cell
 from agent.obs.logging import summarize_session
 from agent.runtime import Runtime, build_runtime
 from config.settings import load_settings
@@ -313,7 +313,10 @@ def _with_footer(runtime: Runtime, body: str, trace_id: str, started: float, val
     elapsed = time.perf_counter() - started
     queries = len(values.get("results") or [])
     scanned = int(values.get("bytes_total") or 0)
+    timings = _node_timings(runtime, trace_id)
     footer = f"trace: {trace_id} · {queries} queries · {scanned} bytes · {elapsed:.1f}s"
+    if timings:
+        footer += f"\n\nnodes: {timings}"
     if runtime.verbose and (values.get("rewritten_sql") or values.get("sql")):
         footer += f"\n\n```sql\n{values.get('rewritten_sql') or values.get('sql')}\n```"
     return f"{body}\n\n{footer}"
@@ -332,16 +335,24 @@ def _markdown_tables(results: list[dict]) -> str:
         rule = "| " + " | ".join("---" for _ in columns) + " |"
         body = []
         for row in rows[:15]:
-            body.append("| " + " | ".join(_cell(row.get(column)) for column in columns) + " |")
+            body.append("| " + " | ".join(format_cell(column, row.get(column)) for column in columns) + " |")
         title = frame.get("question") or "Result"
         blocks.append(f"**{title}**\n\n" + "\n".join([header, rule, *body]))
     return "\n\n".join(blocks)
 
 
-def _cell(value: Any) -> str:
-    if value is None:
+def _node_timings(runtime: Runtime, trace_id: str) -> str:
+    if not trace_id:
         return ""
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    parts = []
+    for row in runtime.deps.logger.read_trace(trace_id):
+        span = row.get("span")
+        if span in {None, "turn", "cli"}:
+            continue
+        millis = float(row.get("duration_ms") or 0)
+        label = f"{millis / 1000:.1f}s" if millis >= 1000 else f"{millis:.0f}ms"
+        parts.append(f"{span} {label}")
+    return ", ".join(parts)
 
 
 def _first_line(text: str) -> str:

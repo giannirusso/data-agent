@@ -73,6 +73,10 @@ def give_up_node(state: dict, deps: Deps) -> dict:
         )
     elif fatal == "bq_outage":
         message = "The data warehouse is temporarily unavailable; your question is saved, try `/retry`."
+    elif fatal == "model_config":
+        message = state.get("last_error") or (
+            "The configured model is not available. Set GEMINI_MODEL_PRO and GEMINI_MODEL_FLASH in .env."
+        )
     elif fatal == "model_outage":
         message = "The model is busy right now. Try again in a minute with `/retry`."
     elif fatal == "no_scope":

@@ -21,9 +21,14 @@ def test_unknown_user_is_a_clean_error():
     assert "Traceback" not in result.stdout
 
 
-def test_repl_answers_schema_and_exits_without_credentials():
+def test_repl_answers_schema_and_exits_without_credentials(tmp_path, monkeypatch):
+    # A developer .env in the working directory must not leak into this test.
+    env_file = tmp_path / ".env"
+    env_file.write_text("GOOGLE_API_KEY=live-key\nGCP_PROJECT=live-project\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["--user", "alice"], input="what data is available?\n/exit\n")
     assert result.exit_code == 0
     assert "GOOGLE_API_KEY" in result.stdout
+    assert "live-key" not in result.stdout
     assert "Not available" in result.stdout
     assert "Traceback" not in result.stdout

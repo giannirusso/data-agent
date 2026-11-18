@@ -74,7 +74,7 @@ def build_runtime(
     record = users[user]
     brands = list(record.get("brands") or [])
     known_brands = sorted({brand for item in users.values() for brand in (item.get("brands") or [])})
-    masker = PiiMasker(protected_bigrams={brand.lower() for brand in known_brands if " " in brand})
+    masker = PiiMasker()
     logger = AgentLogger(settings.log_path, masker)
     reports = ReportsRepo(settings.sqlite_path)
     models = ModelProvider(settings, complete=complete, retry_min=retry_min)

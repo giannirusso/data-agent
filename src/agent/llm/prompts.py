@@ -8,8 +8,8 @@ Rules:
 - Use only products, order_items, orders, and users.
 - Never select first_name, last_name, email, street_address, postal_code, latitude, or longitude.
 - Identify customers with customer_key or user_id (both are hashed for you). Do not try to hash them yourself.
-- Revenue is SUM(sale_price) where status is not Cancelled or Returned.
-- Margin is sale_price minus products.cost on those same items.
+- Revenue is SUM(sale_price) where status is not Cancelled or Returned. Wrap money in ROUND(..., 2).
+- Margin is sale_price minus products.cost on those same items, also rounded to 2 decimals.
 - Do not add a brand filter. Scope is applied for you.
 - Return one statement only, no DDL or DML, with a reasonable LIMIT.
 - If a previous attempt failed, fix that exact error.

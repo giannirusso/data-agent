@@ -5,12 +5,13 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage
 
 from agent.deps import Deps, status
+from agent.safety.pii_masker import collect_pii_values
 
 
 def mask_node(state: dict, deps: Deps) -> dict:
     status(deps, "masking")
     raw = state.get("response") or ""
-    masked = deps.masker.mask(raw)
+    masked = deps.masker.mask(raw, extra_names=collect_pii_values(state.get("results")))
     deps.logger.span(
         trace_id=state.get("trace_id") or "",
         span="turn",

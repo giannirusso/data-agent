@@ -12,9 +12,15 @@ from config.settings import Settings
 
 @pytest.fixture(autouse=True)
 def _no_live_credentials(monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.delenv("GCP_PROJECT", raising=False)
-    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    """Tests must not read a developer .env or a live API key."""
+    for key in ("GOOGLE_API_KEY", "GCP_PROJECT", "GOOGLE_CLOUD_PROJECT", "GEMINI_API_KEY"):
+        monkeypatch.setenv(key, "")
+
+    def _isolated() -> Settings:
+        return Settings(_env_file=None, google_api_key="", gcp_project="")
+
+    monkeypatch.setattr("config.settings.load_settings", _isolated)
+    monkeypatch.setattr("agent.cli.load_settings", _isolated)
 
 
 @pytest.fixture

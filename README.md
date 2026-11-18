@@ -232,7 +232,7 @@ Four independent layers:
 | L1 Guard | Before any SQL | Injection phrases, "emails of customers", DML/DDL aimed at warehouse tables, obvious off-topic |
 | L2 Data shape | Safe CTEs (authorized views in prod) | A compromised model still cannot read raw PII columns or other brands |
 | L3 SQL validator | `sqlglot`, before dry run | More than one statement, non-SELECT, unknown tables, cross-project refs, forbidden columns, `SELECT *` from users, missing scope parameters, limit above 1000 |
-| L4 Masker | Final text and every log line | Emails, phones, card numbers, street addresses, labelled postal codes, person-name patterns. Brands and place names are protected. Presidio is used if it is installed; it is not required |
+| L4 Masker | Final text and every log line | Emails, phones, card numbers, street addresses, labelled postal codes. Person names only when they match a real `first_name`/`last_name` value or a label such as "customer Jane Doe". Product titles and categories are not treated as names. |
 
 "Show me the emails of the top 10 customers" is refused, with an offer to use `customer_key` instead. The BigQuery client is not called.
 
@@ -263,7 +263,10 @@ Order of checks: sqlglot (local) → BigQuery dry run → execute with `maximum_
 - The same SQL string on the next attempt stops the loop.
 - Empty results are retried once with a casing and date-range hint, then answered as no data.
 - Suspicious results (negative revenue or margin, all-null rows, more than 1000 rows) are retried once, then the turn stops.
-- Gemini 429/5xx/timeouts use tenacity (3 tries) and then Flash. Repeated Pro failures open a small in-process circuit breaker.
+- Gemini calls use a 20s timeout (`GEMINI_TIMEOUT_SECONDS`) and `thinking_level=low`. A simple question is two calls (SQL, then analysis). Planning runs only for "why" / compare / report questions, and it uses the Flash tier. The guard does not call the model unless the text already looks like a jailbreak.
+- 429/503/timeouts retry once, then fall back to Flash when that id is different. A retired model id, 404, invalid key, or permission error is not retried and is not described as "busy".
+- The default model id is `gemini-3.8-flash` for both tiers. `gemini-2.5-*` returns 404 for new keys. `GEMINI_MODEL_PRO` is the configurable Pro-tier id; leave it on Flash unless you accept the extra latency.
+- A previous 257s turn with one small BigQuery job was two untimed `gemini-2.5-pro` calls (a thinking model) on a long prompt, not the warehouse. The answer footer lists each node's duration (`nodes: generate_sql 3.2s, execute 1.1s, …`). `/trace` shows the same spans.
 - BigQuery credential and project errors stop immediately with a setup message. Transient warehouse errors are retried, then the user is told to `/retry`.
 - Successful frames are cached in-process, keyed by SQL + parameters + user.
 - `handle_message` catches unexpected exceptions, logs a masked error, prints `Something went wrong (trace …)`, and keeps the session open.
@@ -278,7 +281,7 @@ The production program in the HLD (execution accuracy, faithfulness, release gat
 
 Every node writes one JSON line to `logs/agent.jsonl`: `trace_id`, `span`, `duration_ms`, `status`, and a details object. Payloads pass through the PII masker first. A `turn` span records intent, query count, bytes, persona version, golden ids, and mask hits.
 
-`/trace <id>` prints the spans, including SQL, attempt number, bytes, and errors. `/stats` summarizes the session. The answer footer always shows the `trace_id`.
+`/trace <id>` prints the spans, including SQL, attempt number, bytes, and errors. `/stats` summarizes the session. The answer footer always shows the `trace_id` and a per-node timing line (`nodes: generate_sql 3.2s, execute 1.1s, …`). Money columns are rounded to two decimals in that table.
 
 LangFuse is optional. With both keys set, a LangChain callback is added to the graph config. A missing package, a missing key, or an exporter error does not fail the turn.
 
@@ -298,7 +301,8 @@ Safety and SQL rules live in code (`agent/llm/prompts.py` and the validator). To
 | Dry run over `BQ_MAX_BYTES` | A message about narrowing the query. Execute is not called |
 | Empty result | An honest no-data answer after one retry |
 | Gemini missing | `GOOGLE_API_KEY is not set`. Schema and reports still work |
-| Gemini 429/5xx | Retry, then Flash, then "try again in a minute" |
+| Gemini 429/503/timeout | Retry once, then Flash if it is a different id, then "The model is busy right now. Try `/retry`" |
+| Gemini 404, retired model, bad key, permission | `Model <id> not available: <reason>. Set GEMINI_MODEL_PRO and GEMINI_MODEL_FLASH in .env` |
 | BigQuery missing or down | Setup instructions, or "data warehouse is temporarily unavailable, try `/retry`" |
 | Golden Bucket or LangFuse down | The turn continues. Retrieval becomes zero-shot. Logs stay local |
 | Delete reply is ambiguous, expired, or tampered | "Deletion cancelled. Nothing was deleted." |
@@ -376,8 +380,9 @@ Useful overrides:
 
 | Variable | Role |
 |---|---|
-| `GEMINI_MODEL_PRO` | SQL and analysis. Default `gemini-2.5-pro` |
-| `GEMINI_MODEL_FLASH` | Fallback and optional guard. Default `gemini-2.5-flash` |
+| `GEMINI_MODEL_PRO` | SQL and analysis. Default `gemini-3.8-flash` (set a Pro id only if you want that latency) |
+| `GEMINI_MODEL_FLASH` | Fallback and planning. Default `gemini-3.8-flash` |
+| `GEMINI_TIMEOUT_SECONDS` | Per-request Gemini timeout. Default `20` |
 | `BQ_MAX_BYTES` | Dry-run ceiling and `maximum_bytes_billed`. Default `1000000000` |
 | `PII_SALT` | Salt inside `FARM_FINGERPRINT` |
 | `LLM_GUARD` | `suspicious` (default), `always`, or `off` |
@@ -408,7 +413,7 @@ docker run -it --env-file .env -v ~/.config/gcloud:/root/.config/gcloud retail-a
 ```text
 $ python -m agent.cli --user alice
 Retail Analyst Agent · user: alice · scope: Calvin Klein, Allegra K
-model: gemini-2.5-pro (fallback gemini-2.5-flash)
+model: gemini-3.8-flash (fallback gemini-3.8-flash)
 
 you> Why are users in Texas underspending compared to California?
 planning (3 steps)… querying BigQuery…
@@ -462,7 +467,7 @@ I can't reach Gemini because GOOGLE_API_KEY is not set. …
 
 Verified in this environment:
 
-- `pytest` — 36 tests, all offline (scripted model, fake BigQuery). Covers PII masking, log masking, the SQL gate, brand parameters, over-budget rejection, the delete interrupt (exact ids, subset, cancel, other user's reports, expiry, restore, audit), the retry loop, identical-SQL stop, 429 fallback to Flash, empty and negative results, multi-step reports, and a CLI that stays up.
+- `pytest` — offline tests (scripted model, fake BigQuery). Covers PII masking (including product titles that must not become `[NAME]`), log masking, the SQL gate, brand parameters, over-budget rejection, the delete interrupt, the retry loop, 429 fallback, a retired model id (not reported as "busy"), money rounded to cents, and a CLI that stays up even when a local `.env` contains a key.
 - `python -m agent.cli --help` and `python -m agent --help`.
 - A piped REPL as `alice` with no `GOOGLE_API_KEY` and no `GCP_PROJECT`: banner explains both, schema and `/whoami` work, the email request is refused, `/exit` returns 0.
 - `python evals/run_eval.py`: red-team 6/6, SQL rejections 4/4, PII leak count 0. Execution accuracy is printed as `n/a`.

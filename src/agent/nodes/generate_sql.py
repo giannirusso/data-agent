@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 
 from agent.deps import Deps, status
-from agent.llm.models import LLMFatalError
+from agent.llm.models import LLMConfigError, LLMFatalError
 from agent.llm.parsing import extract_sql
 from agent.llm.prompts import SQL_SYSTEM
-from agent.safety.safe_schema import catalog_markdown
+from agent.safety.safe_schema import sql_prompt_schema
 
 
 def generate_sql_node(state: dict, deps: Deps) -> dict:
@@ -33,23 +33,33 @@ def generate_sql_node(state: dict, deps: Deps) -> dict:
             "retry_execute": False,
         }
 
+    shown = (state.get("golden_trios") or [])[:1]
     trios = "\n\n".join(
-        f"Example {trio.get('id')}\nQuestion: {trio.get('question')}\nSQL:\n{trio.get('sql')}"
-        for trio in (state.get("golden_trios") or [])
+        f"Example {trio.get('id')}: {trio.get('question')}\n{(trio.get('sql') or '')[:400]}"
+        for trio in shown
     )
+    previous_sql = state.get("sql") or ""
     user = "\n\n".join(
         [
             f"Sub-question: {sub.get('question')}",
             f"Original question: {state.get('user_text')}",
-            "Schema:\n" + catalog_markdown(),
+            "Schema:\n" + sql_prompt_schema(),
             "Metric notes:\n" + _metrics(deps),
-            "Analyst examples:\n" + (trios or "(none)"),
-            "Previous SQL:\n" + (state.get("sql") or "(none)"),
+            "Analyst example:\n" + (trios or "(none)"),
+            "Previous SQL:\n" + (previous_sql[:500] or "(none)"),
             "Previous error:\n" + (state.get("last_error") or "(none)"),
         ]
     )
     try:
         raw = deps.models.generate(tier="pro", system=SQL_SYSTEM, user=user)
+    except LLMConfigError as exc:
+        return {
+            "fatal": "model_config",
+            "stop_retry": True,
+            "last_error": str(exc),
+            "attempts": attempts,
+            "retry_execute": False,
+        }
     except LLMFatalError as exc:
         return {
             "fatal": "model_outage",

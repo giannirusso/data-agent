@@ -31,7 +31,7 @@ def plan_node(state: dict, deps: Deps) -> dict:
     user = f"Question: {question}\n\nAnalyst examples:\n{examples or '(none)'}"
     subquestions = None
     try:
-        raw = deps.models.generate(tier="pro", system=PLAN_SYSTEM, user=user)
+        raw = deps.models.generate(tier="flash", system=PLAN_SYSTEM, user=user)
         data = extract_json(raw)
         if not data:
             raw = deps.models.generate(

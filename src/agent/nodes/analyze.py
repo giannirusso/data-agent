@@ -6,6 +6,7 @@ import re
 
 from agent.deps import Deps, status
 from agent.llm.prompts import ANALYZE_SYSTEM
+from agent.safety.pii_masker import collect_pii_values
 
 
 def analyze_node(state: dict, deps: Deps) -> dict:
@@ -13,7 +14,7 @@ def analyze_node(state: dict, deps: Deps) -> dict:
     persona = deps.persona.load()
     prefs = deps.reports.preferences(state.get("user_id") or "")
     narrative = _narrative(state, deps, persona, prefs)
-    masked = deps.masker.mask(narrative).text
+    masked = deps.masker.mask(narrative, extra_names=collect_pii_values(state.get("results"))).text
     title = _title(masked, state.get("user_text") or "Analysis")
     update = {
         "response": masked,
@@ -68,33 +69,31 @@ def _analyze_prompt(state, persona, prefs, frames, trios) -> str:
     import json
 
     profile = ", ".join(f"{key}={value}" for key, value in prefs.items()) or "none"
-    examples = "\n".join(f"{trio.get('id')}: {trio.get('report_md')}" for trio in trios)
+    tone = str(persona.get("tone") or "").strip().split("\n")[0][:240]
+    example = ""
+    if trios:
+        example = f"{trios[0].get('id')}: {(trios[0].get('report_md') or '')[:280]}"
     payload = []
-    for frame in frames:
+    for frame in frames[:4]:
         payload.append(
             {
                 "question": frame.get("question"),
                 "columns": frame.get("columns"),
-                "rows": (frame.get("rows") or [])[:20],
+                "rows": (frame.get("rows") or [])[:8],
                 "row_count": frame.get("row_count"),
                 "empty": frame.get("empty"),
             }
         )
     return "\n\n".join(
         [
-            f"Persona:\n{deps_persona(persona)}",
-            f"User format profile: {profile}",
+            f"Tone: {tone}",
+            f"Format: {profile}",
             f"Question: {state.get('user_text')}",
-            f"Scope note: {state.get('scope_note') or 'results are limited to the user brands'}",
             f"Brands: {', '.join(state.get('entitled_brands') or [])}",
-            "Analyst style notes:\n" + (examples or "(none)"),
-            "Result frames:\n" + json.dumps(payload, default=str),
+            "Style: " + (example or "(none)"),
+            "Results:\n" + json.dumps(payload, default=str),
         ]
     )
-
-
-def deps_persona(persona: dict) -> str:
-    return "\n".join(f"{key}: {value}" for key, value in persona.items())
 
 
 def _fallback(state: dict, frames: list[dict]) -> str:

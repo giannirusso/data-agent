@@ -75,6 +75,9 @@ def test_identical_sql_stops_early(settings):
 
 
 def test_rate_limit_falls_back_to_flash(settings):
+    settings = settings.model_copy(
+        update={"gemini_model_pro": "gemini-pro-test", "gemini_model_flash": "gemini-flash-test"}
+    )
     class RateLimit(Exception):
         def __init__(self):
             super().__init__("429 resource exhausted")
@@ -262,7 +265,39 @@ def test_model_provider_does_not_retry_forever(settings):
     provider = ModelProvider(settings, complete=complete, retry_min=0)
     try:
         provider.generate(tier="pro", system="PURPOSE: sql", user="hi")
+        raise AssertionError("expected the provider to fail")
     except Exception as exc:
-        assert "unavailable" in str(exc).lower() or "429" in str(exc)
-    # pro is retried 3 times, then flash is retried 3 times
-    assert calls["n"] == 6
+        assert "busy" in str(exc).lower()
+    # Same model id for both tiers, so there is no second pass.
+    # One retry (2 attempts) then stop. A 404 must not be treated this way.
+    assert calls["n"] == 2
+
+
+def test_retired_model_is_a_config_error_not_busy(settings):
+    calls = {"n": 0}
+
+    def complete(system, user, tier):
+        calls["n"] += 1
+        raise RuntimeError("404 NOT_FOUND: models/gemini-2.5-pro is no longer available to new users")
+
+    runtime = make_runtime(settings, bq=FakeBQ(), complete=complete)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert calls["n"] == 1
+    assert "not available" in reply.lower()
+    assert "GEMINI_MODEL" in reply
+    assert "busy" not in reply.lower()
+
+
+def test_money_is_rounded_in_the_table(settings):
+    bq = FakeBQ(rows=[{"revenue": 519.9799804688, "orders": 3}])
+
+    def complete(system, user, tier):
+        if "PURPOSE: sql" in system:
+            return VALID
+        return "Revenue is in the table."
+
+    runtime = make_runtime(settings, bq=bq, complete=complete)
+    reply = handle_message(runtime, "Monthly revenue in 2023")
+    assert "519.98" in reply
+    assert "519.9799804688" not in reply
+    assert "generate_sql" in reply

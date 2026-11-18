@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+from datetime import date
+
 from agent.cli import handle_message
 from agent.data.cache import QueryCache
 from agent.golden.retriever import GoldenRetriever
@@ -223,6 +225,8 @@ def test_report_plans_several_steps_and_cites_a_trio(settings):
         )
 
     runtime = make_runtime(settings, bq=bq, complete=complete)
+    runtime.deps.data_through = date(2026, 11, 18)
+    runtime.deps.data_through_source = "orders"
     reply = handle_message(
         runtime,
         "Create a Q1 performance report with insights and action items",

@@ -80,7 +80,11 @@ def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list
 
 def _report_narrative(state, deps, persona, prefs, frames, trios) -> str:
     """One model call. A timeout or the call cap still returns a saved report."""
-    period = parse_period(state.get("user_text") or "")
+    period = parse_period(
+        state.get("user_text") or "",
+        data_through=getattr(deps, "data_through", None),
+        source=getattr(deps, "data_through_source", "today"),
+    )
     note = state.get("period_note") or period.note
     fallback = template_summary(period, frames)
     if note and note not in fallback:

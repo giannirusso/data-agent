@@ -75,7 +75,7 @@ def unauthorized_brands(text: str, entitled: list[str], known: list[str]) -> lis
 def route_node(state: dict, deps: Deps) -> dict:
     status(deps, "routing")
     text = state.get("user_text") or ""
-    has_results = bool(state.get("results"))
+    has_results = bool(state.get("results") or state.get("prior_results"))
     intent = heuristic_intent(text, has_results=has_results)
     if (
         intent == "analysis"
@@ -115,6 +115,13 @@ def route_node(state: dict, deps: Deps) -> dict:
                         f"Your scope is {brands}."
                     ),
                     "status": "refused",
+                    "results": [],
+                    "bytes_total": 0,
+                    "pending_frame": None,
+                    "sql": None,
+                    "rewritten_sql": None,
+                    "last_error": None,
+                    "fatal": None,
                 }
             )
     return update

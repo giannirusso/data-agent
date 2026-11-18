@@ -103,6 +103,13 @@ def guard_node(state: dict, deps: Deps) -> dict:
             "response": refusal_text(decision.category),
             "status": "refused",
             "save_report": False,
+            "results": [],
+            "bytes_total": 0,
+            "pending_frame": None,
+            "sql": None,
+            "rewritten_sql": None,
+            "last_error": None,
+            "fatal": None,
         }
     return {"refusal": False, "status": "ok"}
 

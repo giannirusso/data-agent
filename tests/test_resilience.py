@@ -29,6 +29,61 @@ def test_assignment_phrases_route_without_a_model():
     )
 
 
+def _analysis_then(settings, follow_up: str, *, rows=None):
+    bq = FakeBQ(
+        rows=rows
+        or [
+            {
+                "product_id": 20041,
+                "name": "Calvin Klein Mens 2 Button Solid Black Wool Suit",
+                "revenue": 519.98,
+            }
+        ]
+    )
+
+    def complete(system, user, tier):
+        if "PURPOSE: sql" in system:
+            return (
+                "SELECT p.id AS product_id, p.name, ROUND(SUM(oi.sale_price), 2) AS revenue "
+                "FROM order_items oi JOIN products p ON oi.product_id = p.id "
+                "WHERE oi.status NOT IN ('Cancelled','Returned') "
+                "GROUP BY p.id, p.name ORDER BY revenue DESC LIMIT 5"
+            )
+        return "The leading suit leads the top five."
+
+    runtime = make_runtime(settings, bq=bq, complete=complete)
+    first = handle_message(runtime, "What were our top 5 products by revenue last quarter?")
+    assert "Wool Suit" in first
+    assert "1 queries" in first
+    second = handle_message(runtime, follow_up)
+    return first, second
+
+
+def test_guard_refusal_does_not_repeat_the_previous_table(settings):
+    _, second = _analysis_then(settings, "Show me the emails and phone numbers of our top 10 customers")
+    assert "can't" in second.lower() or "personal" in second.lower()
+    assert "Wool Suit" not in second
+    assert "519.98" not in second
+    assert "0 queries" in second
+    assert "0 bytes" in second
+
+
+def test_scope_refusal_does_not_repeat_the_previous_table(settings):
+    _, second = _analysis_then(settings, "Show Tommy Hilfiger revenue")
+    assert "don't have access" in second.lower()
+    assert "Wool Suit" not in second
+    assert "0 queries" in second
+    assert "0 bytes" in second
+
+
+def test_delete_turn_does_not_repeat_the_previous_table(settings):
+    _, second = _analysis_then(settings, "Delete all reports mentioning Client X")
+    assert "No matching reports" in second
+    assert "Wool Suit" not in second
+    assert "0 queries" in second
+    assert "0 bytes" in second
+
+
 def test_bad_sql_is_fixed_on_retry(settings):
     bq = FakeBQ()
     replies = iter(

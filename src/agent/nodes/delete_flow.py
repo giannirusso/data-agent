@@ -116,6 +116,9 @@ def find_delete_node(state: dict, deps: Deps) -> dict:
             "pending_delete": None,
             "response": "No matching reports.",
             "status": "ok",
+            "results": [],
+            "bytes_total": 0,
+            "pending_frame": None,
         }
     ids = [int(row["id"]) for row in rows]
     prompt = format_confirmation(
@@ -134,13 +137,13 @@ def find_delete_node(state: dict, deps: Deps) -> dict:
         "large_threshold": deps.settings.large_delete_threshold,
         "session_scoped": parsed["session_only"],
     }
-    return {"pending_delete": pending, "response": ""}
+    return {"pending_delete": pending, "response": "", **_clear_turn_display()}
 
 
 def confirm_delete_node(state: dict, deps: Deps) -> dict:
     pending = state.get("pending_delete") or None
     if not pending:
-        return {"response": "No matching reports.", "status": "ok", "pending_delete": None}
+        return {"response": "No matching reports.", "status": "ok", "pending_delete": None, **_clear_turn_display()}
     answer = interrupt(
         {
             "type": "confirm_delete",
@@ -155,6 +158,7 @@ def confirm_delete_node(state: dict, deps: Deps) -> dict:
             "response": decision.message,
             "status": "cancelled",
             "pending_delete": None,
+            **_clear_turn_display(),
         }
     deleted = deps.reports.soft_delete(
         state.get("user_id") or "",
@@ -167,6 +171,7 @@ def confirm_delete_node(state: dict, deps: Deps) -> dict:
             "response": "Nothing was deleted. Those reports were no longer active.",
             "status": "cancelled",
             "pending_delete": None,
+            **_clear_turn_display(),
         }
     noun = "report" if len(deleted) == 1 else "reports"
     return {
@@ -176,4 +181,17 @@ def confirm_delete_node(state: dict, deps: Deps) -> dict:
         ),
         "status": "deleted",
         "pending_delete": None,
+        **_clear_turn_display(),
+    }
+
+
+def _clear_turn_display() -> dict:
+    return {
+        "results": [],
+        "bytes_total": 0,
+        "pending_frame": None,
+        "sql": None,
+        "rewritten_sql": None,
+        "last_error": None,
+        "fatal": None,
     }

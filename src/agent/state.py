@@ -26,6 +26,7 @@ class AgentState(TypedDict, total=False):
     stop_retry: bool
     fatal: str | None
     results: list[dict]
+    prior_results: list[dict]
     pending_frame: dict | None
     pending_delete: dict | None
     trace_id: str

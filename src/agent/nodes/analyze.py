@@ -13,8 +13,9 @@ def analyze_node(state: dict, deps: Deps) -> dict:
     status(deps, "writing the answer")
     persona = deps.persona.load()
     prefs = deps.reports.preferences(state.get("user_id") or "")
-    narrative = _narrative(state, deps, persona, prefs)
-    masked = deps.masker.mask(narrative, extra_names=collect_pii_values(state.get("results"))).text
+    frames = _frames(state)
+    narrative = _narrative(state, deps, persona, prefs, frames)
+    masked = deps.masker.mask(narrative, extra_names=collect_pii_values(frames)).text
     title = _title(masked, state.get("user_text") or "Analysis")
     update = {
         "response": masked,
@@ -23,6 +24,8 @@ def analyze_node(state: dict, deps: Deps) -> dict:
         "status": "ok",
         "fatal": None,
     }
+    if state.get("results"):
+        update["prior_results"] = list(state["results"])
     if state.get("save_report") or state.get("intent") == "report":
         report_id = deps.reports.save(
             state.get("user_id") or "",
@@ -51,8 +54,12 @@ def save_last_node(state: dict, deps: Deps) -> dict:
     return {"response": f"Saved as report #{report_id} \"{title}\".", "status": "ok"}
 
 
-def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict) -> str:
-    frames = state.get("results") or []
+def _frames(state: dict) -> list:
+    return list(state.get("results") or state.get("prior_results") or [])
+
+
+def _narrative(state: dict, deps: Deps, persona: dict, prefs: dict, frames: list | None = None) -> str:
+    frames = list(frames if frames is not None else _frames(state))
     trios = state.get("golden_trios") or []
     if deps.models.available() and frames:
         user = _analyze_prompt(state, persona, prefs, frames, trios)

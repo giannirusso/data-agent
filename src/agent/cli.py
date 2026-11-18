@@ -240,8 +240,12 @@ def _new_turn(runtime: Runtime, text: str) -> str:
         "transient_tries": 0,
         "status": "",
         "last_bytes": 0,
+        "bytes_total": 0,
         "pii_hits": 0,
         "scope_note": "",
+        # Drop the previous turn's table. Follow-up text still sees prior_results.
+        "results": [],
+        "pending_frame": None,
     }
     interrupted = _stream(runtime, payload)
     if interrupted:
